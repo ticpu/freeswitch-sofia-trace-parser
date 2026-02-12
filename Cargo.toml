@@ -1,0 +1,20 @@
+[package]
+name = "freeswitch-sofia-trace-parser"
+version = "0.1.0"
+edition = "2021"
+license = "LGPL-2.1-or-later"
+authors = ["Jérôme Poulin <jeromepoulin@gmail.com>"]
+description = "Parser for FreeSWITCH mod_sofia SIP trace dump files"
+
+[lib]
+name = "freeswitch_sofia_trace_parser"
+
+[[bin]]
+name = "freeswitch-sofia-trace-parser"
+path = "src/bin/main.rs"
+
+[dependencies]
+memchr = "2"
+tracing = "0.1"
+clap = { version = "4", features = ["derive"] }
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
