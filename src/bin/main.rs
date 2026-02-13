@@ -9,7 +9,7 @@ use tracing::error;
 
 use freeswitch_sofia_trace_parser::types::{Direction, SipMessageType};
 use freeswitch_sofia_trace_parser::{
-    FrameIterator, MessageIterator, ParsedMessageIterator, ParsedSipMessage,
+    FrameIterator, MessageIterator, ParsedMessageIterator, ParsedSipMessage, SipMessage,
 };
 
 #[derive(Parser)]
@@ -45,6 +45,22 @@ struct Cli {
     #[arg(short = 'H', long = "header", value_name = "NAME=REGEX")]
     header: Vec<String>,
 
+    /// Match regex against message body
+    #[arg(short = 'b', long = "body-grep", value_name = "REGEX")]
+    body_grep: Option<String>,
+
+    /// Match regex against full reconstructed SIP message
+    #[arg(short = 'g', long = "grep", value_name = "REGEX")]
+    grep: Option<String>,
+
+    /// Output all messages sharing Call-IDs with matched messages
+    #[arg(short = 'D', long = "dialog")]
+    dialog: bool,
+
+    /// Include OPTIONS messages (excluded by default)
+    #[arg(long = "all-methods")]
+    all_methods: bool,
+
     /// Show full SIP message content
     #[arg(long, group = "output_mode")]
     full: bool,
@@ -77,24 +93,40 @@ struct Cli {
 struct CompiledFilters {
     methods: Vec<String>,
     excludes: Vec<String>,
+    exclude_options: bool,
     call_id: Option<Regex>,
     direction: Option<Direction>,
     address: Option<Regex>,
     headers: Vec<(String, Regex)>,
+    body_grep: Option<Regex>,
+    grep: Option<Regex>,
 }
 
 impl CompiledFilters {
+    fn is_excluded(&self, msg: &ParsedSipMessage) -> bool {
+        let method = msg.method().unwrap_or("");
+
+        if self.exclude_options && method.eq_ignore_ascii_case("OPTIONS") {
+            return true;
+        }
+
+        if !self.excludes.is_empty()
+            && self.excludes.iter().any(|m| m.eq_ignore_ascii_case(method))
+        {
+            return true;
+        }
+
+        false
+    }
+
     fn matches(&self, msg: &ParsedSipMessage) -> bool {
+        if self.is_excluded(msg) {
+            return false;
+        }
+
         if !self.methods.is_empty() {
             let method = msg.method().unwrap_or("");
             if !self.methods.iter().any(|m| m.eq_ignore_ascii_case(method)) {
-                return false;
-            }
-        }
-
-        if !self.excludes.is_empty() {
-            let method = msg.method().unwrap_or("");
-            if self.excludes.iter().any(|m| m.eq_ignore_ascii_case(method)) {
                 return false;
             }
         }
@@ -129,6 +161,21 @@ impl CompiledFilters {
             }
         }
 
+        if let Some(ref re) = self.body_grep {
+            let body_str = msg.body_text();
+            if !re.is_match(&body_str) {
+                return false;
+            }
+        }
+
+        if let Some(ref re) = self.grep {
+            let full = msg.to_bytes();
+            let full_str = String::from_utf8_lossy(&full);
+            if !re.is_match(&full_str) {
+                return false;
+            }
+        }
+
         true
     }
 }
@@ -146,6 +193,9 @@ fn compile_regex(pattern: &str, label: &str) -> Regex {
 fn compile_filters(cli: &Cli) -> CompiledFilters {
     let methods: Vec<String> = cli.method.iter().map(|m| m.to_uppercase()).collect();
     let excludes: Vec<String> = cli.exclude.iter().map(|m| m.to_uppercase()).collect();
+
+    let exclude_options = !cli.all_methods
+        && !methods.iter().any(|m| m == "OPTIONS");
 
     let call_id = cli.call_id.as_ref().map(|p| compile_regex(p, "call-id"));
 
@@ -174,13 +224,22 @@ fn compile_filters(cli: &Cli) -> CompiledFilters {
         headers.push((name, re));
     }
 
+    let body_grep = cli
+        .body_grep
+        .as_ref()
+        .map(|p| compile_regex(p, "body-grep"));
+    let grep = cli.grep.as_ref().map(|p| compile_regex(p, "grep"));
+
     CompiledFilters {
         methods,
         excludes,
+        exclude_options,
         call_id,
         direction,
         address,
         headers,
+        body_grep,
+        grep,
     }
 }
 
@@ -266,32 +325,12 @@ fn format_frame_header(msg: &ParsedSipMessage) -> String {
 
 fn output_full(msg: &ParsedSipMessage) {
     println!("{}", format_frame_header(msg));
-    let rebuilt = rebuild_message(msg);
+    let rebuilt = msg.to_bytes();
     let content_str = String::from_utf8_lossy(&rebuilt);
     print!("{content_str}");
     if !content_str.ends_with('\n') {
         println!();
     }
-}
-
-fn rebuild_message(msg: &ParsedSipMessage) -> Vec<u8> {
-    let mut out = Vec::new();
-    match &msg.message_type {
-        SipMessageType::Request { method, uri } => {
-            out.extend_from_slice(format!("{method} {uri} SIP/2.0\r\n").as_bytes());
-        }
-        SipMessageType::Response { code, reason } => {
-            out.extend_from_slice(format!("SIP/2.0 {code} {reason}\r\n").as_bytes());
-        }
-    }
-    for (name, value) in &msg.headers {
-        out.extend_from_slice(format!("{name}: {value}\r\n").as_bytes());
-    }
-    out.extend_from_slice(b"\r\n");
-    if !msg.body.is_empty() {
-        out.extend_from_slice(&msg.body);
-    }
-    out
 }
 
 fn output_headers(msg: &ParsedSipMessage) {
@@ -316,6 +355,18 @@ fn output_body(msg: &ParsedSipMessage) {
         if !body_str.ends_with('\n') {
             println!();
         }
+    }
+}
+
+fn output_message(cli: &Cli, msg: &ParsedSipMessage) {
+    if cli.full {
+        output_full(msg);
+    } else if cli.headers {
+        output_headers(msg);
+    } else if cli.body {
+        output_body(msg);
+    } else {
+        println!("{}", format_summary(msg));
     }
 }
 
@@ -448,17 +499,105 @@ fn run_filtered(reader: Box<dyn Read>, cli: &Cli, filters: &CompiledFilters) {
                 if !filters.matches(&msg) {
                     continue;
                 }
-                if cli.full {
-                    output_full(&msg);
-                } else if cli.headers {
-                    output_headers(&msg);
-                } else if cli.body {
-                    output_body(&msg);
-                } else {
-                    println!("{}", format_summary(&msg));
-                }
+                output_message(cli, &msg);
             }
             Err(e) => error!("parse error: {e}"),
+        }
+    }
+}
+
+struct DialogState {
+    messages: Vec<SipMessage>,
+    matched: bool,
+    saw_bye: bool,
+    saw_bye_response: bool,
+}
+
+fn run_dialog(reader: Box<dyn Read>, cli: &Cli, filters: &CompiledFilters) {
+    let mut dialogs: HashMap<String, DialogState> = HashMap::new();
+
+    // Single pass: collect messages by Call-ID, track matches
+    for result in MessageIterator::new(reader) {
+        let sip_msg = match result {
+            Ok(m) => m,
+            Err(e) => {
+                error!("message error: {e}");
+                continue;
+            }
+        };
+
+        let parsed = match sip_msg.parse() {
+            Ok(p) => p,
+            Err(e) => {
+                error!("parse error: {e}");
+                continue;
+            }
+        };
+
+        if filters.is_excluded(&parsed) {
+            continue;
+        }
+
+        let call_id = match parsed.call_id() {
+            Some(cid) => cid.to_string(),
+            None => continue,
+        };
+
+        let is_match = filters.matches(&parsed);
+
+        // Detect BYE and BYE responses for pruning
+        let is_bye_request = matches!(
+            &parsed.message_type,
+            SipMessageType::Request { method, .. } if method.eq_ignore_ascii_case("BYE")
+        );
+        let is_bye_response = matches!(
+            &parsed.message_type,
+            SipMessageType::Response { .. }
+        ) && parsed
+            .method()
+            .map(|m| m.eq_ignore_ascii_case("BYE"))
+            .unwrap_or(false);
+
+        let state = dialogs.entry(call_id).or_insert_with(|| DialogState {
+            messages: Vec::new(),
+            matched: false,
+            saw_bye: false,
+            saw_bye_response: false,
+        });
+
+        if is_match {
+            state.matched = true;
+        }
+        if is_bye_request {
+            state.saw_bye = true;
+        }
+        if is_bye_response {
+            state.saw_bye_response = true;
+        }
+
+        state.messages.push(sip_msg);
+
+        // Prune: dialog terminated and never matched
+        if state.saw_bye && state.saw_bye_response && !state.matched {
+            dialogs.remove(parsed.call_id().unwrap());
+        }
+    }
+
+    // Output matched dialogs in chronological order
+    let mut matched_messages: Vec<SipMessage> = Vec::new();
+    for (_, state) in dialogs {
+        if state.matched {
+            matched_messages.extend(state.messages);
+        }
+    }
+
+    // Sort by timestamp for chronological output across Call-IDs
+    matched_messages.sort_by_key(|m| m.timestamp.sort_key());
+
+    for sip_msg in &matched_messages {
+        match sip_msg.parse() {
+            Ok(parsed) => output_message(cli, &parsed),
+            Err(e) => error!("parse error on output: {e}"),
         }
     }
 }
@@ -467,19 +606,34 @@ fn main() {
     let cli = Cli::parse();
     init_tracing(cli.verbose);
 
-    let reader = open_input(&cli.files);
+    if cli.dialog && (cli.raw || cli.frames) {
+        eprintln!("--dialog is incompatible with --raw and --frames");
+        process::exit(2);
+    }
+
+    if cli.dialog && cli.stats {
+        eprintln!("--dialog is incompatible with --stats");
+        process::exit(2);
+    }
 
     if cli.frames {
-        run_frames(reader);
+        run_frames(open_input(&cli.files));
         return;
     }
 
     if cli.raw {
-        run_raw(reader);
+        run_raw(open_input(&cli.files));
         return;
     }
 
     let filters = compile_filters(&cli);
+
+    if cli.dialog {
+        run_dialog(open_input(&cli.files), &cli, &filters);
+        return;
+    }
+
+    let reader = open_input(&cli.files);
 
     if cli.stats {
         run_stats(reader, &filters);

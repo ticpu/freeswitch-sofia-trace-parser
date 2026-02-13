@@ -130,15 +130,14 @@ Tested against 53 production dump files (~5.5GB) from FreeSWITCH NG-911 infrastr
 
 ## CLI Tool
 
+OPTIONS keepalives are excluded by default (use `--all-methods` to include them).
+
 ```sh
-# One-line summary of all messages
+# One-line summary (OPTIONS excluded by default)
 freeswitch-sofia-trace-parser profile.dump
 
 # Pipe from xzcat
 xzcat profile.dump.1.xz | freeswitch-sofia-trace-parser
-
-# Exclude OPTIONS keepalives (and their 200 OK responses)
-freeswitch-sofia-trace-parser -x OPTIONS profile.dump
 
 # Filter by method — shows INVITE requests and their 100/180/200 responses
 freeswitch-sofia-trace-parser -m INVITE profile.dump
@@ -148,6 +147,12 @@ freeswitch-sofia-trace-parser -c '6fba3e7e-dddf' profile.dump
 
 # Header regex — all sent INVITEs from a specific extension
 freeswitch-sofia-trace-parser -m INVITE -d sent -H 'From=Extension 1583' profile.dump
+
+# Grep for a string anywhere in the SIP message (headers + body)
+freeswitch-sofia-trace-parser -g '15551234567' profile.dump
+
+# Body grep — match only in message body (SDP, EIDO XML, etc.)
+freeswitch-sofia-trace-parser -b 'conference-info' -m NOTIFY --body profile.dump
 
 # Extract SDP body from a specific call's INVITEs
 freeswitch-sofia-trace-parser -c '6fba3e7e' -m INVITE -d sent --body profile.dump
@@ -166,6 +171,32 @@ freeswitch-sofia-trace-parser --frames profile.dump
 freeswitch-sofia-trace-parser --raw profile.dump
 ```
 
+### Dialog mode
+
+Use `-D` to expand matched messages to full Call-ID conversations. When any message
+matches, all messages sharing its Call-ID are output. Single pass — works with stdin/pipes.
+
+```sh
+# Find dialogs containing INVITEs, show full call flow
+freeswitch-sofia-trace-parser -D -m INVITE profile.dump
+
+# Find all dialogs related to an incident ID (across profiles)
+freeswitch-sofia-trace-parser -D -H 'Call-Info=abc123def456' \
+    esinet1-v4-tcp.dump.* esinet1-v6-tcp.dump.*
+
+# Find dialogs by phone number anywhere in message
+freeswitch-sofia-trace-parser -D -g '15551234567' profile.dump.*
+
+# Find dialogs by body content (EIDO XML, PIDF)
+freeswitch-sofia-trace-parser -D -b 'Moncton' --full profile.dump.*
+
+# Works with stdin/pipes
+xzcat profile.dump.1.xz | freeswitch-sofia-trace-parser -D -m INVITE
+```
+
+Terminated dialogs (BYE + 200 OK) that never matched are pruned during processing
+to limit memory usage. Unmatched Call-IDs with only OPTIONS traffic are never buffered.
+
 ### Filter options
 
 | Flag | Description |
@@ -176,6 +207,10 @@ freeswitch-sofia-trace-parser --raw profile.dump
 | `-d, --direction <DIR>` | Filter by direction (`recv`/`sent`) |
 | `-a, --address <REGEX>` | Match address by regex |
 | `-H, --header <NAME=REGEX>` | Match header value by regex, repeatable |
+| `-g, --grep <REGEX>` | Match regex against full reconstructed SIP message |
+| `-b, --body-grep <REGEX>` | Match regex against message body only |
+| `-D, --dialog` | Expand matches to full Call-ID conversations |
+| `--all-methods` | Include OPTIONS (excluded by default) |
 
 ### Output modes
 
