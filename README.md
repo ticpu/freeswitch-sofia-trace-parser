@@ -71,6 +71,23 @@ for frame in FrameIterator::new(chain) {
 - Non-UTF-8 content (works on `&[u8]`)
 - EOF without trailing `\x0B\n`
 
+## Validated Against Production Data
+
+Tested against 53 production dump files (~5.5GB) from FreeSWITCH NG-911 infrastructure:
+
+| Profile | Frames | Messages | Multi-frame | byte_count mismatches |
+|---|---|---|---|---|
+| TCP IPv4 (10 files) | 4.8M | 4.6M | 17,935 (max 6) | 0 |
+| UDP IPv4 (10 files) | 4.1M | 4.1M (1:1) | 0 | 0 |
+| TLS IPv6 (11 files) | 4.7M | 4.7M | 108 | 0 |
+| TLS IPv4 (2 files) | 252K | 251K | 70 | 0 |
+| Internal TCP v4 (10 files) | 605K | - | - | 0 |
+| Internal TCP v6 (10 files) | 716K | - | - | 0 |
+
+- Zero byte_count mismatches across all frames
+- 99.99%+ of reassembled messages start with a valid SIP request/response line
+- File concatenation (`cat dump.29 dump.28 |`): 965,515 frames, zero mismatches
+
 ## Building
 
 ```sh
