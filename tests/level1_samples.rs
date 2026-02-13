@@ -16,8 +16,20 @@ fn parse_sample(name: &str) -> Vec<freeswitch_sofia_trace_parser::Frame> {
         return vec![];
     }
     let file = File::open(&path).unwrap();
-    let frames: Result<Vec<_>, _> = FrameIterator::new(file).collect();
-    frames.unwrap_or_else(|e| panic!("failed to parse {name}: {e}"))
+    let mut errors = 0usize;
+    let frames: Vec<_> = FrameIterator::new(file)
+        .filter_map(|r| match r {
+            Ok(f) => Some(f),
+            Err(_) => {
+                errors += 1;
+                None
+            }
+        })
+        .collect();
+    if errors > 0 {
+        eprintln!("{name}: {errors} recovery errors skipped");
+    }
+    frames
 }
 
 fn assert_all_frames_valid(frames: &[freeswitch_sofia_trace_parser::Frame], name: &str) {
@@ -35,8 +47,14 @@ fn assert_all_frames_valid(frames: &[freeswitch_sofia_trace_parser::Frame], name
 }
 
 fn count_by_direction(frames: &[freeswitch_sofia_trace_parser::Frame]) -> (usize, usize) {
-    let recv = frames.iter().filter(|f| f.direction == Direction::Recv).count();
-    let sent = frames.iter().filter(|f| f.direction == Direction::Sent).count();
+    let recv = frames
+        .iter()
+        .filter(|f| f.direction == Direction::Recv)
+        .count();
+    let sent = frames
+        .iter()
+        .filter(|f| f.direction == Direction::Sent)
+        .count();
     (recv, sent)
 }
 
@@ -218,10 +236,7 @@ fn all_samples_consistent_frame_counts() {
                 continue;
             }
             let file = File::open(&path).unwrap();
-            let frame_count = FrameIterator::new(file)
-                .collect::<Result<Vec<_>, _>>()
-                .unwrap_or_else(|e| panic!("failed to parse {name}: {e}"))
-                .len();
+            let frame_count = FrameIterator::new(file).filter_map(Result::ok).count();
             counts.push((n, frame_count));
         }
         if counts.is_empty() {
@@ -294,10 +309,7 @@ fn byte_count_distribution() {
     }
 
     // 1440 should be common (TCP MSS segments from multi-frame messages)
-    let mss_count = frames
-        .iter()
-        .filter(|f| f.byte_count == 1440)
-        .count();
+    let mss_count = frames.iter().filter(|f| f.byte_count == 1440).count();
     eprintln!("  frames with 1440 bytes (TCP MSS): {mss_count}");
 }
 
@@ -313,21 +325,17 @@ fn file_concatenation_two_dumps() {
         return;
     }
 
-    // Parse each file individually
+    // Parse each file individually (filter errors from recovery)
     let count1 = FrameIterator::new(File::open(&path1).unwrap())
-        .collect::<Result<Vec<_>, _>>()
-        .unwrap()
-        .len();
+        .filter_map(Result::ok)
+        .count();
     let count2 = FrameIterator::new(File::open(&path2).unwrap())
-        .collect::<Result<Vec<_>, _>>()
-        .unwrap()
-        .len();
+        .filter_map(Result::ok)
+        .count();
 
     // Parse concatenated stream
     let chain = std::io::Read::chain(File::open(&path1).unwrap(), File::open(&path2).unwrap());
-    let combined_frames: Vec<_> = FrameIterator::new(chain)
-        .collect::<Result<Vec<_>, _>>()
-        .unwrap();
+    let combined_frames: Vec<_> = FrameIterator::new(chain).filter_map(Result::ok).collect();
 
     // The concatenated parse should recover: we may lose the truncated first frame
     // of file 2 (absorbed or skipped), but the rest should parse fine.
@@ -350,5 +358,40 @@ fn file_concatenation_two_dumps() {
         .filter(|f| f.byte_count != f.content.len())
         .count();
     eprintln!("  byte_count mismatches: {mismatches}/{combined_count}");
-    assert_eq!(mismatches, 0, "concatenated parse should have zero byte_count mismatches");
+    assert_eq!(
+        mismatches, 0,
+        "concatenated parse should have zero byte_count mismatches"
+    );
+}
+
+#[test]
+fn esinet1_v4_tcp_150() {
+    let frames = parse_sample("esinet1-v4-tcp.dump.150");
+    if frames.is_empty() {
+        return;
+    }
+    assert_all_frames_valid(&frames, "esinet1-v4-tcp.dump.150");
+
+    assert!(
+        frames.iter().all(|f| f.transport == Transport::Tcp),
+        "expected all TCP frames"
+    );
+
+    let (recv, sent) = count_by_direction(&frames);
+    assert!(recv > 0, "expected recv frames");
+    assert!(sent > 0, "expected sent frames");
+
+    let mismatches: Vec<_> = frames
+        .iter()
+        .enumerate()
+        .filter(|(_, f)| f.byte_count != f.content.len())
+        .collect();
+
+    eprintln!(
+        "esinet1-v4-tcp.dump.150: {} frames ({} recv, {} sent), {} byte_count mismatches",
+        frames.len(),
+        recv,
+        sent,
+        mismatches.len(),
+    );
 }

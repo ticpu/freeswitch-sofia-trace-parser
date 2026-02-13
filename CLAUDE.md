@@ -3,6 +3,7 @@
 ## Build & Test Workflow
 
 ```sh
+cargo fmt
 cargo check --message-format=short
 cargo clippy --fix --allow-dirty --message-format=short
 cargo test --lib                    # unit tests (fast, no sample files needed)
@@ -57,6 +58,24 @@ cargo test --test level3_samples -- --nocapture
 # Single test
 cargo test --test level1_samples esinet1_v4_tcp -- --nocapture
 ```
+
+## Development Methodology — TDD
+
+This project follows test-driven development:
+
+1. Write failing tests that reproduce the bug or specify the new behavior
+2. Confirm tests fail (`cargo test --lib`)
+3. Commit the failing tests
+4. Implement the fix/feature
+5. Confirm all tests pass
+6. Commit the implementation
+
+## Investigation Principle
+
+Before modifying the data stream (frame parsing, message reassembly, SIP parsing),
+consider all 3 parsing levels. The parser aims for 100% accuracy — no missing bytes.
+If a new dump file triggers errors, investigate the root cause across all levels before
+assuming malformed data and adding workarounds.
 
 ## Key Design Decisions
 

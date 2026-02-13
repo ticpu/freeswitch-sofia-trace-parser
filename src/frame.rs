@@ -425,14 +425,8 @@ impl<R: Read> Iterator for FrameIterator<R> {
                             .map(|p| p + 1)
                             .unwrap_or(self.buf.len())
                     };
-                    warn!(
-                        error = %e,
-                        header = %header_preview,
-                        skipped_bytes = skip,
-                        "skipped invalid frame header",
-                    );
                     self.buf.drain(..skip);
-                    return self.next();
+                    return Some(Err(e));
                 }
             }
         };
@@ -762,9 +756,8 @@ mod tests {
             b"recv 3 bytes from tcp/2.2.2.2:5060 at 01:00:00.000000:\nfoo\x0B\n",
         );
 
-        let frames: Vec<Frame> = FrameIterator::new(&data[..])
-            .collect::<Result<Vec<_>, _>>()
-            .unwrap();
+        let items: Vec<Result<Frame, ParseError>> = FrameIterator::new(&data[..]).collect();
+        let frames: Vec<Frame> = items.into_iter().filter_map(Result::ok).collect();
         assert_eq!(frames.len(), 3);
         assert_eq!(frames[0].content, b"hello");
         assert_eq!(frames[1].content, b"world");
@@ -791,9 +784,8 @@ mod tests {
         // Valid second frame of file 2
         data.extend_from_slice(b"sent 3 bytes to tcp/3.3.3.3:5060 at 02:00:00.000000:\nbar\x0B\n");
 
-        let frames: Vec<Frame> = FrameIterator::new(&data[..])
-            .collect::<Result<Vec<_>, _>>()
-            .unwrap();
+        let items: Vec<Result<Frame, ParseError>> = FrameIterator::new(&data[..]).collect();
+        let frames: Vec<Frame> = items.into_iter().filter_map(Result::ok).collect();
         assert_eq!(frames.len(), 2);
         assert_eq!(frames[0].content, b"hello");
         assert_eq!(frames[1].content, b"bar");
@@ -834,9 +826,8 @@ mod tests {
         data.extend_from_slice(b"sent 3 bytes to tcp/2.2.2.2:5060 at 00:00:01.000000:\nbye\x0B\n");
 
         let filtered = crate::grep::GrepFilter::new(&data[..]);
-        let frames: Vec<Frame> = FrameIterator::new(filtered)
-            .collect::<Result<Vec<_>, _>>()
-            .unwrap();
+        let items: Vec<Result<Frame, ParseError>> = FrameIterator::new(filtered).collect();
+        let frames: Vec<Frame> = items.into_iter().filter_map(Result::ok).collect();
         assert_eq!(frames.len(), 2);
         assert_eq!(frames[0].content, b"hello");
         assert_eq!(frames[1].content, b"bye");
@@ -911,5 +902,62 @@ mod tests {
         assert_eq!(frames.len(), 2);
         assert_eq!(frames[0].as_ref().unwrap().content, b"hello");
         assert_eq!(frames[1].as_ref().unwrap().content, b"bye");
+    }
+
+    #[test]
+    fn frame_iterator_extra_newline_after_boundary() {
+        // Some dump files have \x0B\n\n between frames (extra \n after boundary).
+        // The extra \n should be stripped, not trigger recovery warnings.
+        let mut data = Vec::new();
+        data.extend_from_slice(
+            b"recv 5 bytes from tcp/1.1.1.1:5060 at 00:00:00.000000:\nhello\x0B\n",
+        );
+        data.push(b'\n');
+        data.extend_from_slice(
+            b"sent 5 bytes to tcp/1.1.1.1:5060 at 00:00:00.000001:\nworld\x0B\n",
+        );
+
+        let frames: Vec<Frame> = FrameIterator::new(&data[..])
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert_eq!(frames.len(), 2);
+        assert_eq!(frames[0].content, b"hello");
+        assert_eq!(frames[1].content, b"world");
+    }
+
+    #[test]
+    fn frame_iterator_multiple_newlines_after_boundary() {
+        // Multiple \n and \r\n between frames should all be stripped.
+        let mut data = Vec::new();
+        data.extend_from_slice(
+            b"recv 5 bytes from tcp/1.1.1.1:5060 at 00:00:00.000000:\nhello\x0B\n",
+        );
+        data.extend_from_slice(b"\n\r\n\n");
+        data.extend_from_slice(
+            b"sent 5 bytes to tcp/1.1.1.1:5060 at 00:00:00.000001:\nworld\x0B\n",
+        );
+
+        let frames: Vec<Frame> = FrameIterator::new(&data[..])
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert_eq!(frames.len(), 2);
+        assert_eq!(frames[0].content, b"hello");
+        assert_eq!(frames[1].content, b"world");
+    }
+
+    #[test]
+    fn frame_iterator_trailing_newlines_at_eof() {
+        // Trailing newlines after the last boundary at EOF should not cause errors.
+        let mut data = Vec::new();
+        data.extend_from_slice(
+            b"recv 5 bytes from tcp/1.1.1.1:5060 at 00:00:00.000000:\nhello\x0B\n",
+        );
+        data.extend_from_slice(b"\n\n");
+
+        let frames: Vec<Frame> = FrameIterator::new(&data[..])
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert_eq!(frames.len(), 1);
+        assert_eq!(frames[0].content, b"hello");
     }
 }

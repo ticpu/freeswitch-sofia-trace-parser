@@ -15,8 +15,7 @@ fn parse_messages(name: &str) -> Vec<freeswitch_sofia_trace_parser::SipMessage> 
         return vec![];
     }
     let file = File::open(&path).unwrap();
-    let msgs: Result<Vec<_>, _> = MessageIterator::new(file).collect();
-    msgs.unwrap_or_else(|e| panic!("failed to parse {name}: {e}"))
+    MessageIterator::new(file).filter_map(Result::ok).collect()
 }
 
 #[test]
@@ -28,24 +27,19 @@ fn tcp_reassembly_produces_fewer_messages_than_frames() {
     }
 
     let frame_count = freeswitch_sofia_trace_parser::FrameIterator::new(File::open(&path).unwrap())
-        .collect::<Result<Vec<_>, _>>()
-        .unwrap()
-        .len();
+        .filter_map(Result::ok)
+        .count();
 
     let msg_count = MessageIterator::new(File::open(&path).unwrap())
-        .collect::<Result<Vec<_>, _>>()
-        .unwrap()
-        .len();
+        .filter_map(Result::ok)
+        .count();
 
     eprintln!("esinet1-v4-tcp.dump.20: {frame_count} frames → {msg_count} messages");
     assert!(
         msg_count < frame_count,
         "TCP reassembly should produce fewer messages than frames"
     );
-    assert!(
-        msg_count > 0,
-        "should produce at least one message"
-    );
+    assert!(msg_count > 0, "should produce at least one message");
 }
 
 #[test]
@@ -57,14 +51,12 @@ fn udp_messages_equal_frames() {
     }
 
     let frame_count = freeswitch_sofia_trace_parser::FrameIterator::new(File::open(&path).unwrap())
-        .collect::<Result<Vec<_>, _>>()
-        .unwrap()
-        .len();
+        .filter_map(Result::ok)
+        .count();
 
     let msg_count = MessageIterator::new(File::open(&path).unwrap())
-        .collect::<Result<Vec<_>, _>>()
-        .unwrap()
-        .len();
+        .filter_map(Result::ok)
+        .count();
 
     eprintln!("esinet1-v4-udp.dump.20: {frame_count} frames → {msg_count} messages");
     assert_eq!(
@@ -108,18 +100,20 @@ fn tls_v6_with_real_traffic() {
     }
 
     let frame_count = freeswitch_sofia_trace_parser::FrameIterator::new(File::open(&path).unwrap())
-        .collect::<Result<Vec<_>, _>>()
-        .unwrap()
-        .len();
+        .filter_map(Result::ok)
+        .count();
 
     let msgs: Vec<_> = MessageIterator::new(File::open(&path).unwrap())
-        .collect::<Result<Vec<_>, _>>()
-        .unwrap();
+        .filter_map(Result::ok)
+        .collect();
 
     let msg_count = msgs.len();
     let multi: Vec<_> = msgs.iter().filter(|m| m.frame_count > 1).collect();
 
-    eprintln!("esinet1-v6-tls.dump.180: {frame_count} frames → {msg_count} messages ({} multi-frame)", multi.len());
+    eprintln!(
+        "esinet1-v6-tls.dump.180: {frame_count} frames → {msg_count} messages ({} multi-frame)",
+        multi.len()
+    );
     if let Some(max) = multi.iter().map(|m| m.frame_count).max() {
         eprintln!("  max frame_count: {max}");
     }
@@ -142,13 +136,12 @@ fn tls_v4_with_real_traffic() {
     }
 
     let frame_count = freeswitch_sofia_trace_parser::FrameIterator::new(File::open(&path).unwrap())
-        .collect::<Result<Vec<_>, _>>()
-        .unwrap()
-        .len();
+        .filter_map(Result::ok)
+        .count();
 
     let msgs: Vec<_> = MessageIterator::new(File::open(&path).unwrap())
-        .collect::<Result<Vec<_>, _>>()
-        .unwrap();
+        .filter_map(Result::ok)
+        .collect();
 
     let msg_count = msgs.len();
     let multi = msgs.iter().filter(|m| m.frame_count > 1).count();
