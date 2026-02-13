@@ -9,8 +9,7 @@ use tracing::error;
 
 use freeswitch_sofia_trace_parser::types::{Direction, SipMessageType};
 use freeswitch_sofia_trace_parser::{
-    FrameIterator, GrepFilter, MessageIterator, ParsedMessageIterator, ParsedSipMessage,
-    SipMessage,
+    FrameIterator, GrepFilter, MessageIterator, ParsedMessageIterator, ParsedSipMessage, SipMessage,
 };
 
 enum OutputMode {
@@ -118,8 +117,7 @@ impl CompiledFilters {
             return true;
         }
 
-        if !self.excludes.is_empty()
-            && self.excludes.iter().any(|m| m.eq_ignore_ascii_case(method))
+        if !self.excludes.is_empty() && self.excludes.iter().any(|m| m.eq_ignore_ascii_case(method))
         {
             return true;
         }
@@ -202,8 +200,7 @@ fn compile_filters(cli: &Cli) -> CompiledFilters {
     let methods: Vec<String> = cli.method.iter().map(|m| m.to_uppercase()).collect();
     let excludes: Vec<String> = cli.exclude.iter().map(|m| m.to_uppercase()).collect();
 
-    let exclude_options = !cli.all_methods
-        && !methods.iter().any(|m| m == "OPTIONS");
+    let exclude_options = !cli.all_methods && !methods.iter().any(|m| m == "OPTIONS");
 
     let call_id = cli.call_id.as_ref().map(|p| compile_regex(p, "call-id"));
 
@@ -304,8 +301,7 @@ fn init_tracing(verbose: u8) {
     };
     tracing_subscriber::fmt()
         .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| level.into()),
+            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| level.into()),
         )
         .with_writer(io::stderr)
         .init();
@@ -323,7 +319,12 @@ fn format_summary(msg: &ParsedSipMessage) -> String {
     let call_id = msg.call_id().unwrap_or("-");
     format!(
         "{} {} {}/{} {} {}",
-        msg.timestamp, msg.direction, msg.transport, msg.address, msg.message_type.summary(), call_id
+        msg.timestamp,
+        msg.direction,
+        msg.transport,
+        msg.address,
+        msg.message_type.summary(),
+        call_id
     )
 }
 
@@ -539,13 +540,11 @@ fn run_dialog(reader: Box<dyn Read>, mode: &OutputMode, filters: &CompiledFilter
             &parsed.message_type,
             SipMessageType::Request { method, .. } if method.eq_ignore_ascii_case("BYE")
         );
-        let is_bye_response = matches!(
-            &parsed.message_type,
-            SipMessageType::Response { .. }
-        ) && parsed
-            .method()
-            .map(|m| m.eq_ignore_ascii_case("BYE"))
-            .unwrap_or(false);
+        let is_bye_response = matches!(&parsed.message_type, SipMessageType::Response { .. })
+            && parsed
+                .method()
+                .map(|m| m.eq_ignore_ascii_case("BYE"))
+                .unwrap_or(false);
 
         let state = dialogs.entry(call_id).or_insert_with(|| DialogState {
             messages: Vec::new(),

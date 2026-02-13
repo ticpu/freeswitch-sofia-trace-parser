@@ -40,13 +40,55 @@ impl<R: std::io::Read> Iterator for ParsedMessageIterator<R> {
     }
 }
 
+fn content_preview(content: &[u8], max_len: usize) -> String {
+    use std::fmt::Write;
+    let len = content.len().min(max_len);
+    let s = String::from_utf8_lossy(&content[..len]);
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '\r' => out.push_str("\\r"),
+            '\n' => out.push_str("\\n"),
+            '\t' => out.push_str("\\t"),
+            '\0' => out.push_str("\\0"),
+            c if c.is_control() => {
+                let _ = write!(out, "\\x{:02x}", c as u32);
+            }
+            c => out.push(c),
+        }
+    }
+    if content.len() > max_len {
+        out.push_str("...");
+    }
+    out
+}
+
 fn parse_sip_message(msg: &SipMessage) -> Result<ParsedSipMessage, ParseError> {
     let content = &msg.content;
 
+    parse_sip_content(msg, content).map_err(|e| {
+        let reason = match e {
+            ParseError::InvalidMessage(reason) => reason,
+            other => return other,
+        };
+        let preview = content_preview(content, 200);
+        ParseError::InvalidMessage(format!(
+            "{} {}/{} at {} ({} frames, {} bytes): {reason}\n  {preview}",
+            msg.direction,
+            msg.transport,
+            msg.address,
+            msg.timestamp,
+            msg.frame_count,
+            content.len(),
+        ))
+    })
+}
+
+fn parse_sip_content(msg: &SipMessage, content: &[u8]) -> Result<ParsedSipMessage, ParseError> {
     // Find end of first line
     let first_line_end = CRLF
         .find(content)
-        .ok_or_else(|| ParseError::InvalidHeader("no CRLF in SIP message".into()))?;
+        .ok_or_else(|| ParseError::InvalidMessage("no CRLF found".into()))?;
     let first_line = &content[..first_line_end];
 
     let message_type = parse_first_line(first_line)?;
@@ -96,12 +138,12 @@ fn parse_status_line(line: &[u8]) -> Result<SipMessageType, ParseError> {
     let after_version = &line[8..]; // skip "SIP/2.0 "
 
     let space = memchr::memchr(b' ', after_version)
-        .ok_or_else(|| ParseError::InvalidHeader("no space after status code".into()))?;
+        .ok_or_else(|| ParseError::InvalidMessage("no space after status code".into()))?;
     let code_bytes = &after_version[..space];
     let code: u16 = std::str::from_utf8(code_bytes)
-        .map_err(|_| ParseError::InvalidHeader("non-UTF-8 status code".into()))?
+        .map_err(|_| ParseError::InvalidMessage("non-UTF-8 status code".into()))?
         .parse()
-        .map_err(|_| ParseError::InvalidHeader("invalid status code".into()))?;
+        .map_err(|_| ParseError::InvalidMessage("invalid status code".into()))?;
 
     let reason = &after_version[space + 1..];
     let reason = bytes_to_string(reason);
@@ -109,18 +151,31 @@ fn parse_status_line(line: &[u8]) -> Result<SipMessageType, ParseError> {
     Ok(SipMessageType::Response { code, reason })
 }
 
+fn is_sip_token(b: &[u8]) -> bool {
+    !b.is_empty()
+        && b.iter()
+            .all(|&c| c.is_ascii_alphanumeric() || b"-._!%*+'~".contains(&c))
+}
+
 fn parse_request_line(line: &[u8]) -> Result<SipMessageType, ParseError> {
     // <METHOD> <URI> SIP/2.0
     let first_space = memchr::memchr(b' ', line)
-        .ok_or_else(|| ParseError::InvalidHeader("no space in request line".into()))?;
+        .ok_or_else(|| ParseError::InvalidMessage("no space in request line".into()))?;
     let method = &line[..first_space];
+
+    if !is_sip_token(method) {
+        return Err(ParseError::InvalidMessage(format!(
+            "invalid SIP method: {:?}",
+            String::from_utf8_lossy(method)
+        )));
+    }
     let rest = &line[first_space + 1..];
 
     let last_space = memchr::memrchr(b' ', rest)
-        .ok_or_else(|| ParseError::InvalidHeader("no SIP version in request line".into()))?;
+        .ok_or_else(|| ParseError::InvalidMessage("no SIP version in request line".into()))?;
     let version = &rest[last_space + 1..];
     if version != b"SIP/2.0" {
-        return Err(ParseError::InvalidHeader(format!(
+        return Err(ParseError::InvalidMessage(format!(
             "expected SIP/2.0, got {:?}",
             String::from_utf8_lossy(version)
         )));
@@ -642,6 +697,35 @@ mod tests {
         let msg = make_sip_message(content);
         let result = msg.parse();
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn parse_request_rejects_xml_method() {
+        let content =
+            b"</confInfo:conference-info>NOTIFY sip:user@host SIP/2.0\r\nContent-Length: 0\r\n\r\n";
+        let msg = make_sip_message(content);
+        assert!(msg.parse().is_err(), "should reject XML-prefixed method");
+    }
+
+    #[test]
+    fn parse_request_rejects_method_with_angle_brackets() {
+        let content = b"<xml>BYE sip:host SIP/2.0\r\n\r\n";
+        let msg = make_sip_message(content);
+        assert!(msg.parse().is_err());
+    }
+
+    #[test]
+    fn parse_request_accepts_extension_method() {
+        let content = b"CUSTOM-METHOD sip:host SIP/2.0\r\nContent-Length: 0\r\n\r\n";
+        let msg = make_sip_message(content);
+        let parsed = msg.parse().unwrap();
+        assert_eq!(
+            parsed.message_type,
+            SipMessageType::Request {
+                method: "CUSTOM-METHOD".into(),
+                uri: "sip:host".into()
+            }
+        );
     }
 
     #[test]

@@ -1,32 +1,61 @@
+use std::collections::{HashMap, VecDeque};
 use std::sync::LazyLock;
 
 use memchr::memmem;
-use tracing::{debug, trace};
+use tracing::{debug, trace, warn};
 
 use crate::frame::{FrameIterator, ParseError};
-use crate::types::{Frame, SipMessage, Transport};
+use crate::types::{Direction, SipMessage, Timestamp, Transport};
 
 static CRLF: LazyLock<memmem::Finder<'static>> = LazyLock::new(|| memmem::Finder::new(b"\r\n"));
-static CRLFCRLF: LazyLock<memmem::Finder<'static>> = LazyLock::new(|| memmem::Finder::new(b"\r\n\r\n"));
+static CRLFCRLF: LazyLock<memmem::Finder<'static>> =
+    LazyLock::new(|| memmem::Finder::new(b"\r\n\r\n"));
 
 pub struct MessageIterator<R> {
     frames: FrameIterator<R>,
-    pending: Option<Frame>,
+    buffers: HashMap<(Direction, String), ConnectionBuffer>,
+    ready: VecDeque<SipMessage>,
+    exhausted: bool,
+}
+
+struct ConnectionBuffer {
+    transport: Transport,
+    timestamp: Timestamp,
+    content: Vec<u8>,
+    frame_count: usize,
 }
 
 impl<R: std::io::Read> MessageIterator<R> {
     pub fn new(reader: R) -> Self {
         MessageIterator {
             frames: FrameIterator::new(reader),
-            pending: None,
+            buffers: HashMap::new(),
+            ready: VecDeque::new(),
+            exhausted: false,
         }
     }
 
-    fn next_frame(&mut self) -> Option<Result<Frame, ParseError>> {
-        if let Some(frame) = self.pending.take() {
-            return Some(Ok(frame));
+    fn flush_all(&mut self) {
+        let keys: Vec<_> = self.buffers.keys().cloned().collect();
+        for key in keys {
+            if let Some(buf) = self.buffers.get_mut(&key) {
+                let msgs = extract_complete(buf, &key);
+                self.ready.extend(msgs);
+
+                if !buf.content.is_empty() {
+                    let content = std::mem::take(&mut buf.content);
+                    self.ready.push_back(SipMessage {
+                        direction: key.0,
+                        transport: buf.transport,
+                        address: key.1.clone(),
+                        timestamp: buf.timestamp,
+                        content,
+                        frame_count: buf.frame_count,
+                    });
+                    buf.frame_count = 0;
+                }
+            }
         }
-        self.frames.next()
     }
 }
 
@@ -34,87 +63,172 @@ impl<R: std::io::Read> Iterator for MessageIterator<R> {
     type Item = Result<SipMessage, ParseError>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        let first_frame = match self.next_frame()? {
-            Ok(f) => f,
-            Err(e) => return Some(Err(e)),
-        };
+        if let Some(msg) = self.ready.pop_front() {
+            return Some(Ok(msg));
+        }
 
-        let direction = first_frame.direction;
-        let transport = first_frame.transport;
-        let address = first_frame.address.clone();
-        let timestamp = first_frame.timestamp;
-        let mut content = first_frame.content;
-        let mut frame_count: usize = 1;
+        if self.exhausted {
+            return None;
+        }
 
-        // For TCP/TLS/WSS: group consecutive frames with same direction + address
-        if transport != Transport::Udp {
-            loop {
-                match self.frames.next() {
-                    Some(Ok(next_frame)) => {
-                        if next_frame.direction == direction && next_frame.address == address {
-                            trace!(
-                                frame = frame_count + 1,
-                                bytes = next_frame.content.len(),
-                                "appending continuation frame"
-                            );
-                            content.extend_from_slice(&next_frame.content);
-                            frame_count += 1;
-                        } else {
-                            self.pending = Some(next_frame);
-                            break;
-                        }
+        loop {
+            match self.frames.next() {
+                Some(Ok(frame)) => {
+                    if frame.transport == Transport::Udp {
+                        return Some(Ok(SipMessage {
+                            direction: frame.direction,
+                            transport: frame.transport,
+                            address: frame.address,
+                            timestamp: frame.timestamp,
+                            content: frame.content,
+                            frame_count: 1,
+                        }));
                     }
-                    Some(Err(e)) => return Some(Err(e)),
-                    None => break,
+
+                    let key = (frame.direction, frame.address.clone());
+
+                    let buf = self
+                        .buffers
+                        .entry(key.clone())
+                        .or_insert_with(|| ConnectionBuffer {
+                            transport: frame.transport,
+                            timestamp: frame.timestamp,
+                            content: Vec::new(),
+                            frame_count: 0,
+                        });
+
+                    if buf.content.is_empty() {
+                        buf.timestamp = frame.timestamp;
+                    }
+
+                    trace!(
+                        frame = buf.frame_count + 1,
+                        bytes = frame.content.len(),
+                        address = %key.1,
+                        "buffering TCP frame"
+                    );
+
+                    buf.content.extend_from_slice(&frame.content);
+                    buf.frame_count += 1;
+
+                    let msgs = extract_complete(buf, &key);
+                    self.ready.extend(msgs);
+
+                    if let Some(msg) = self.ready.pop_front() {
+                        return Some(Ok(msg));
+                    }
+                }
+                Some(Err(e)) => return Some(Err(e)),
+                None => {
+                    self.exhausted = true;
+                    self.flush_all();
+                    return self.ready.pop_front().map(Ok);
                 }
             }
         }
+    }
+}
+
+/// Extract complete SIP messages from a connection buffer.
+/// Messages are complete when we find headers (\r\n\r\n) and have
+/// Content-Length bytes of body available.
+fn extract_complete(buf: &mut ConnectionBuffer, key: &(Direction, String)) -> Vec<SipMessage> {
+    let mut messages = Vec::new();
+
+    loop {
+        if buf.content.is_empty() {
+            break;
+        }
+
+        // Skip non-SIP prefix (body fragments from incomplete prior messages)
+        if !is_sip_start(&buf.content) {
+            // Skip leading CRLF (inter-message padding)
+            let mut crlf_skip = 0;
+            while crlf_skip + 1 < buf.content.len()
+                && buf.content[crlf_skip] == b'\r'
+                && buf.content[crlf_skip + 1] == b'\n'
+            {
+                crlf_skip += 2;
+            }
+            if crlf_skip > 0
+                && crlf_skip < buf.content.len()
+                && is_sip_start(&buf.content[crlf_skip..])
+            {
+                trace!(
+                    skipped_bytes = crlf_skip,
+                    "skipped inter-message CRLF padding"
+                );
+                buf.content.drain(..crlf_skip);
+                continue;
+            }
+
+            match find_sip_start(&buf.content) {
+                Some(offset) if offset > 0 => {
+                    warn!(
+                        skipped_bytes = offset,
+                        address = %key.1,
+                        "skipped non-SIP prefix in TCP buffer"
+                    );
+                    buf.content.drain(..offset);
+                    continue;
+                }
+                _ => break, // No SIP start found, wait for more data
+            }
+        }
+
+        // Find header/body boundary
+        let header_end = match CRLFCRLF.find(&buf.content) {
+            Some(offset) => offset,
+            None => break, // Headers incomplete, wait for more data
+        };
+        let body_start = header_end + 4;
+
+        let msg_end = match find_content_length(&buf.content) {
+            Some(cl) => {
+                let end = body_start + cl;
+                if end > buf.content.len() {
+                    break; // Body incomplete, wait for more data
+                }
+                end
+            }
+            None => body_start, // No CL = no body (RFC 3261 Section 18.3)
+        };
+
+        let msg_content: Vec<u8> = buf.content.drain(..msg_end).collect();
+
+        // Skip trailing CRLF between messages
+        while buf.content.len() >= 2 && buf.content[0] == b'\r' && buf.content[1] == b'\n' {
+            buf.content.drain(..2);
+        }
+
+        let frame_count = if messages.is_empty() {
+            buf.frame_count
+        } else {
+            0
+        };
 
         if frame_count > 1 {
             debug!(
                 frame_count,
-                total_bytes = content.len(),
-                address,
-                "reassembled multi-frame message"
+                bytes = msg_content.len(),
+                address = %key.1,
+                "extracted reassembled TCP message"
             );
         }
 
-        // Try to split aggregated messages (multiple SIP messages in one frame/reassembly)
-        let split = split_aggregated(&content);
-        if split.len() > 1 {
-            debug!(
-                count = split.len(),
-                "split aggregated messages by Content-Length"
-            );
-            // Return first, queue the rest as synthetic single-frame messages
-            // We only support returning one at a time from the iterator, so we'll
-            // handle this by returning the first and storing remainder in pending content
-            let first_end = split[0];
-            let remainder = content[first_end..].to_vec();
-            content.truncate(first_end);
-
-            // Create a synthetic frame for the remainder
-            if !remainder.is_empty() {
-                self.pending = Some(Frame {
-                    direction,
-                    byte_count: remainder.len(),
-                    transport,
-                    address: address.clone(),
-                    timestamp,
-                    content: remainder,
-                });
-            }
-        }
-
-        Some(Ok(SipMessage {
-            direction,
-            transport,
-            address,
-            timestamp,
-            content,
+        messages.push(SipMessage {
+            direction: key.0,
+            transport: buf.transport,
+            address: key.1.clone(),
+            timestamp: buf.timestamp,
+            content: msg_content,
             frame_count,
-        }))
+        });
+
+        buf.frame_count = 0;
     }
+
+    messages
 }
 
 /// Find Content-Length header value in SIP message bytes.
@@ -144,7 +258,6 @@ fn extract_header_value<'a>(line: &'a [u8], name: &[u8]) -> Option<&'a [u8]> {
     if line.len() <= name.len() + 1 {
         return None;
     }
-    // Case-insensitive prefix match
     if !line[..name.len()].eq_ignore_ascii_case(name) {
         return None;
     }
@@ -155,8 +268,6 @@ fn extract_header_value<'a>(line: &'a [u8], name: &[u8]) -> Option<&'a [u8]> {
 }
 
 fn extract_compact_header_value(line: &[u8], compact: u8) -> Option<&[u8]> {
-    // Compact form: single letter followed by ':'
-    // Must be at start of line and followed by ':' then optional whitespace
     if line.len() < 2 {
         return None;
     }
@@ -167,8 +278,14 @@ fn extract_compact_header_value(line: &[u8], compact: u8) -> Option<&[u8]> {
 }
 
 fn trim_bytes(b: &[u8]) -> &[u8] {
-    let start = b.iter().position(|&c| c != b' ' && c != b'\t').unwrap_or(b.len());
-    let end = b.iter().rposition(|&c| c != b' ' && c != b'\t').map_or(start, |p| p + 1);
+    let start = b
+        .iter()
+        .position(|&c| c != b' ' && c != b'\t')
+        .unwrap_or(b.len());
+    let end = b
+        .iter()
+        .rposition(|&c| c != b' ' && c != b'\t')
+        .map_or(start, |p| p + 1);
     &b[start..end]
 }
 
@@ -182,11 +299,21 @@ fn is_sip_start(data: &[u8]) -> bool {
     if data.starts_with(b"SIP/2.0 ") {
         return true;
     }
-    // Check for known SIP methods
     const METHODS: &[&[u8]] = &[
-        b"INVITE ", b"ACK ", b"BYE ", b"CANCEL ", b"OPTIONS ",
-        b"REGISTER ", b"PRACK ", b"SUBSCRIBE ", b"NOTIFY ",
-        b"PUBLISH ", b"INFO ", b"REFER ", b"MESSAGE ", b"UPDATE ",
+        b"INVITE ",
+        b"ACK ",
+        b"BYE ",
+        b"CANCEL ",
+        b"OPTIONS ",
+        b"REGISTER ",
+        b"PRACK ",
+        b"SUBSCRIBE ",
+        b"NOTIFY ",
+        b"PUBLISH ",
+        b"INFO ",
+        b"REFER ",
+        b"MESSAGE ",
+        b"UPDATE ",
     ];
     for method in METHODS {
         if data.starts_with(method) {
@@ -196,57 +323,36 @@ fn is_sip_start(data: &[u8]) -> bool {
     false
 }
 
-/// Split aggregated SIP messages in a single content blob.
-/// Returns byte offsets where each message ends (exclusive).
-/// If no aggregation detected, returns a single-element vec with the total length.
-fn split_aggregated(content: &[u8]) -> Vec<usize> {
-    if !is_sip_start(content) {
-        return vec![content.len()];
+/// Scan for the first SIP message start at a CRLF boundary within data.
+fn find_sip_start(data: &[u8]) -> Option<usize> {
+    if is_sip_start(data) {
+        return Some(0);
     }
-
-    let mut boundaries = Vec::new();
     let mut pos = 0;
-
-    loop {
-        let header_end = match CRLFCRLF.find(&content[pos..]) {
-            Some(offset) => pos + offset,
-            None => {
-                boundaries.push(content.len());
-                break;
-            }
-        };
-        let body_start = header_end + 4; // past \r\n\r\n
-
-        // Find Content-Length in this message's headers
-        match find_content_length(&content[pos..]) {
-            Some(cl) => {
-                let msg_end = body_start + cl;
-                if msg_end < content.len() && is_sip_start(&content[msg_end..]) {
-                    boundaries.push(msg_end);
-                    pos = msg_end;
-                    continue;
-                }
-                // No more messages after this one
-                boundaries.push(content.len());
-                break;
-            }
-            None => {
-                // No Content-Length — rest is this message
-                boundaries.push(content.len());
-                break;
-            }
+    while let Some(offset) = CRLF.find(&data[pos..]) {
+        let candidate = pos + offset + 2;
+        if candidate >= data.len() {
+            break;
         }
+        if is_sip_start(&data[candidate..]) {
+            return Some(candidate);
+        }
+        pos = candidate;
     }
-
-    boundaries
+    None
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::{Direction, Timestamp};
+    use crate::types::Direction;
 
-    fn make_frame(direction: Direction, transport: Transport, addr: &str, content: &[u8]) -> Vec<u8> {
+    fn make_frame(
+        direction: Direction,
+        transport: Transport,
+        addr: &str,
+        content: &[u8],
+    ) -> Vec<u8> {
         let dir_str = match direction {
             Direction::Recv => "recv",
             Direction::Sent => "sent",
@@ -289,7 +395,12 @@ mod tests {
         let part1 = b"NOTIFY sip:user@host SIP/2.0\r\n";
         let part2 = b"Content-Length: 0\r\n\r\n";
         let mut data = make_frame(Direction::Recv, Transport::Tcp, "[::1]:5060", part1);
-        data.extend_from_slice(&make_frame(Direction::Recv, Transport::Tcp, "[::1]:5060", part2));
+        data.extend_from_slice(&make_frame(
+            Direction::Recv,
+            Transport::Tcp,
+            "[::1]:5060",
+            part2,
+        ));
         let msgs: Vec<SipMessage> = MessageIterator::new(&data[..])
             .collect::<Result<Vec<_>, _>>()
             .unwrap();
@@ -302,11 +413,59 @@ mod tests {
     }
 
     #[test]
+    fn tcp_reassembly_across_interleaved_frames() {
+        // Frame 1: recv from A (partial INVITE)
+        // Frame 2: sent to A (response on same connection — interrupts)
+        // Frame 3: recv from A (rest of INVITE)
+        let part1 = b"INVITE sip:user@host SIP/2.0\r\n";
+        let part2 = b"Content-Length: 3\r\n\r\nSDP";
+        let response = b"SIP/2.0 100 Trying\r\nContent-Length: 0\r\n\r\n";
+
+        let mut data = make_frame(Direction::Recv, Transport::Tcp, "10.0.0.1:5060", part1);
+        data.extend_from_slice(&make_frame(
+            Direction::Sent,
+            Transport::Tcp,
+            "10.0.0.1:5060",
+            response,
+        ));
+        data.extend_from_slice(&make_frame(
+            Direction::Recv,
+            Transport::Tcp,
+            "10.0.0.1:5060",
+            part2,
+        ));
+
+        let msgs: Vec<SipMessage> = MessageIterator::new(&data[..])
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+
+        assert_eq!(msgs.len(), 2);
+
+        // 100 Trying completes first (single frame)
+        let trying = &msgs[0];
+        assert_eq!(trying.direction, Direction::Sent);
+        assert_eq!(trying.content, response);
+
+        // INVITE completes when frame 3 arrives (reassembled from frames 1+3)
+        let invite = &msgs[1];
+        assert_eq!(invite.direction, Direction::Recv);
+        let mut expected_invite = Vec::new();
+        expected_invite.extend_from_slice(part1);
+        expected_invite.extend_from_slice(part2);
+        assert_eq!(invite.content, expected_invite);
+    }
+
+    #[test]
     fn direction_change_splits_messages() {
         let recv_content = b"OPTIONS sip:user@host SIP/2.0\r\nContent-Length: 0\r\n\r\n";
         let sent_content = b"SIP/2.0 200 OK\r\nContent-Length: 0\r\n\r\n";
         let mut data = make_frame(Direction::Recv, Transport::Tcp, "[::1]:5060", recv_content);
-        data.extend_from_slice(&make_frame(Direction::Sent, Transport::Tcp, "[::1]:5060", sent_content));
+        data.extend_from_slice(&make_frame(
+            Direction::Sent,
+            Transport::Tcp,
+            "[::1]:5060",
+            sent_content,
+        ));
         let msgs: Vec<SipMessage> = MessageIterator::new(&data[..])
             .collect::<Result<Vec<_>, _>>()
             .unwrap();
@@ -319,7 +478,12 @@ mod tests {
     fn address_change_splits_messages() {
         let content = b"OPTIONS sip:user@host SIP/2.0\r\nContent-Length: 0\r\n\r\n";
         let mut data = make_frame(Direction::Recv, Transport::Tcp, "[::1]:5060", content);
-        data.extend_from_slice(&make_frame(Direction::Recv, Transport::Tcp, "[::2]:5060", content));
+        data.extend_from_slice(&make_frame(
+            Direction::Recv,
+            Transport::Tcp,
+            "[::2]:5060",
+            content,
+        ));
         let msgs: Vec<SipMessage> = MessageIterator::new(&data[..])
             .collect::<Result<Vec<_>, _>>()
             .unwrap();
@@ -333,7 +497,12 @@ mod tests {
         let content1 = b"OPTIONS sip:a SIP/2.0\r\nContent-Length: 0\r\n\r\n";
         let content2 = b"OPTIONS sip:b SIP/2.0\r\nContent-Length: 0\r\n\r\n";
         let mut data = make_frame(Direction::Recv, Transport::Udp, "1.1.1.1:5060", content1);
-        data.extend_from_slice(&make_frame(Direction::Recv, Transport::Udp, "1.1.1.1:5060", content2));
+        data.extend_from_slice(&make_frame(
+            Direction::Recv,
+            Transport::Udp,
+            "1.1.1.1:5060",
+            content2,
+        ));
         let msgs: Vec<SipMessage> = MessageIterator::new(&data[..])
             .collect::<Result<Vec<_>, _>>()
             .unwrap();
@@ -344,7 +513,6 @@ mod tests {
 
     #[test]
     fn aggregated_messages_split_by_content_length() {
-        // Two SIP messages back-to-back in one frame
         let msg1 = b"NOTIFY sip:a SIP/2.0\r\nContent-Length: 5\r\n\r\nhello";
         let msg2 = b"SIP/2.0 200 OK\r\nContent-Length: 0\r\n\r\n";
         let mut combined = Vec::new();
@@ -398,27 +566,32 @@ mod tests {
     }
 
     #[test]
-    fn split_aggregated_single_message() {
-        let data = b"NOTIFY sip:a SIP/2.0\r\nContent-Length: 5\r\n\r\nhello";
-        let splits = split_aggregated(data);
-        assert_eq!(splits, vec![data.len()]);
+    fn find_sip_start_at_beginning() {
+        let data = b"INVITE sip:user@host SIP/2.0\r\nContent-Length: 0\r\n\r\n";
+        assert_eq!(find_sip_start(data), Some(0));
     }
 
     #[test]
-    fn split_aggregated_two_messages() {
-        let msg1 = b"NOTIFY sip:a SIP/2.0\r\nContent-Length: 5\r\n\r\nhello";
-        let msg2 = b"SIP/2.0 200 OK\r\nContent-Length: 0\r\n\r\n";
-        let mut combined = Vec::new();
-        combined.extend_from_slice(msg1);
-        combined.extend_from_slice(msg2);
-        let splits = split_aggregated(&combined);
-        assert_eq!(splits, vec![msg1.len(), combined.len()]);
+    fn find_sip_start_after_prefix() {
+        let data = b"</xml>\r\nNOTIFY sip:user@host SIP/2.0\r\n";
+        assert_eq!(find_sip_start(data), Some(8));
+    }
+
+    #[test]
+    fn find_sip_start_none() {
+        let data = b"no SIP here at all";
+        assert_eq!(find_sip_start(data), None);
     }
 
     #[test]
     fn message_preserves_metadata() {
         let content = b"OPTIONS sip:user@host SIP/2.0\r\nContent-Length: 0\r\n\r\n";
-        let data = make_frame(Direction::Sent, Transport::Tls, "[2001:db8::1]:5061", content);
+        let data = make_frame(
+            Direction::Sent,
+            Transport::Tls,
+            "[2001:db8::1]:5061",
+            content,
+        );
         let msgs: Vec<SipMessage> = MessageIterator::new(&data[..])
             .collect::<Result<Vec<_>, _>>()
             .unwrap();
@@ -435,5 +608,100 @@ mod tests {
                 usec: 0
             }
         );
+    }
+
+    #[test]
+    fn extract_handles_crlf_between_messages() {
+        let msg1 = b"NOTIFY sip:a SIP/2.0\r\nContent-Length: 5\r\n\r\nhello";
+        let msg2 = b"SIP/2.0 200 OK\r\nContent-Length: 0\r\n\r\n";
+        let mut content = Vec::new();
+        content.extend_from_slice(msg1);
+        content.extend_from_slice(b"\r\n");
+        content.extend_from_slice(msg2);
+
+        let key = (Direction::Recv, "[::1]:5060".to_string());
+        let mut buf = ConnectionBuffer {
+            transport: Transport::Tcp,
+            timestamp: Timestamp::TimeOnly {
+                hour: 0,
+                min: 0,
+                sec: 0,
+                usec: 0,
+            },
+            content,
+            frame_count: 1,
+        };
+        let msgs = extract_complete(&mut buf, &key);
+        assert_eq!(msgs.len(), 2);
+        assert_eq!(msgs[0].content, msg1);
+        assert_eq!(msgs[1].content, msg2);
+    }
+
+    #[test]
+    fn extract_skips_non_sip_prefix() {
+        let prefix = b"</conference-info>\r\n";
+        let msg = b"NOTIFY sip:a SIP/2.0\r\nContent-Length: 0\r\n\r\n";
+        let mut content = Vec::new();
+        content.extend_from_slice(prefix);
+        content.extend_from_slice(msg);
+
+        let key = (Direction::Recv, "[::1]:5060".to_string());
+        let mut buf = ConnectionBuffer {
+            transport: Transport::Tcp,
+            timestamp: Timestamp::TimeOnly {
+                hour: 0,
+                min: 0,
+                sec: 0,
+                usec: 0,
+            },
+            content,
+            frame_count: 1,
+        };
+        let msgs = extract_complete(&mut buf, &key);
+        assert_eq!(msgs.len(), 1);
+        assert_eq!(msgs[0].content, msg);
+    }
+
+    #[test]
+    fn extract_waits_for_incomplete_body() {
+        // Headers complete but body is missing
+        let content = b"INVITE sip:a SIP/2.0\r\nContent-Length: 100\r\n\r\npartial".to_vec();
+
+        let key = (Direction::Recv, "[::1]:5060".to_string());
+        let mut buf = ConnectionBuffer {
+            transport: Transport::Tcp,
+            timestamp: Timestamp::TimeOnly {
+                hour: 0,
+                min: 0,
+                sec: 0,
+                usec: 0,
+            },
+            content,
+            frame_count: 1,
+        };
+        let msgs = extract_complete(&mut buf, &key);
+        assert!(msgs.is_empty(), "should wait for body to complete");
+        assert!(!buf.content.is_empty(), "buffer should retain data");
+    }
+
+    #[test]
+    fn extract_waits_for_incomplete_headers() {
+        // Headers not complete (no \r\n\r\n)
+        let content = b"INVITE sip:a SIP/2.0\r\nContent-Length: 0\r\n".to_vec();
+
+        let key = (Direction::Recv, "[::1]:5060".to_string());
+        let mut buf = ConnectionBuffer {
+            transport: Transport::Tcp,
+            timestamp: Timestamp::TimeOnly {
+                hour: 0,
+                min: 0,
+                sec: 0,
+                usec: 0,
+            },
+            content,
+            frame_count: 1,
+        };
+        let msgs = extract_complete(&mut buf, &key);
+        assert!(msgs.is_empty(), "should wait for headers to complete");
     }
 }

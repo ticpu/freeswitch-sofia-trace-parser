@@ -8,6 +8,7 @@ use crate::types::{Direction, Frame, Timestamp, Transport};
 #[derive(Debug)]
 pub enum ParseError {
     InvalidHeader(String),
+    InvalidMessage(String),
     Io(std::io::Error),
 }
 
@@ -15,6 +16,7 @@ impl fmt::Display for ParseError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             ParseError::InvalidHeader(msg) => write!(f, "invalid frame header: {msg}"),
+            ParseError::InvalidMessage(msg) => write!(f, "invalid SIP message: {msg}"),
             ParseError::Io(e) => write!(f, "I/O error: {e}"),
         }
     }
@@ -418,8 +420,8 @@ impl<R: Read> Iterator for FrameIterator<R> {
 
             // Check at expected position first (byte_count hint)
             if expected_end < self.buf.len() && self.buf[expected_end] == 0x0B {
-                let has_newline = expected_end + 1 < self.buf.len()
-                    && self.buf[expected_end + 1] == b'\n';
+                let has_newline =
+                    expected_end + 1 < self.buf.len() && self.buf[expected_end + 1] == b'\n';
                 let at_eof = expected_end + 1 >= self.buf.len() && self.eof;
 
                 if has_newline || at_eof {
@@ -695,9 +697,7 @@ mod tests {
         data.extend_from_slice(
             b"recv 5 bytes from tcp/1.1.1.1:5060 at 00:00:00.000000:\nhello\x0B\n",
         );
-        data.extend_from_slice(
-            b"sent 3 bytes to tcp/1.1.1.1:5060 at 00:00:01.000000:\nbye",
-        );
+        data.extend_from_slice(b"sent 3 bytes to tcp/1.1.1.1:5060 at 00:00:01.000000:\nbye");
         let frames: Vec<Frame> = FrameIterator::new(&data[..])
             .collect::<Result<Vec<_>, _>>()
             .unwrap();
@@ -755,9 +755,7 @@ mod tests {
         data.extend_from_slice(b"\x0B\n");
 
         // Valid second frame of file 2
-        data.extend_from_slice(
-            b"sent 3 bytes to tcp/3.3.3.3:5060 at 02:00:00.000000:\nbar\x0B\n",
-        );
+        data.extend_from_slice(b"sent 3 bytes to tcp/3.3.3.3:5060 at 02:00:00.000000:\nbar\x0B\n");
 
         let frames: Vec<Frame> = FrameIterator::new(&data[..])
             .collect::<Result<Vec<_>, _>>()
@@ -799,9 +797,7 @@ mod tests {
         // Grep separator followed by partial context from a different group
         data.extend_from_slice(b"Accept: application/sdp\r\nContent-Length: 0\r\n\r\n");
         data.extend_from_slice(b"\x0B\n");
-        data.extend_from_slice(
-            b"sent 3 bytes to tcp/2.2.2.2:5060 at 00:00:01.000000:\nbye\x0B\n",
-        );
+        data.extend_from_slice(b"sent 3 bytes to tcp/2.2.2.2:5060 at 00:00:01.000000:\nbye\x0B\n");
 
         let filtered = crate::grep::GrepFilter::new(&data[..]);
         let frames: Vec<Frame> = FrameIterator::new(filtered)
