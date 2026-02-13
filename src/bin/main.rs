@@ -5,7 +5,7 @@ use std::process;
 
 use clap::Parser;
 use regex::Regex;
-use tracing::error;
+use tracing::info;
 
 use freeswitch_sofia_trace_parser::types::{Direction, SipMessageType};
 use freeswitch_sofia_trace_parser::{
@@ -391,7 +391,7 @@ fn run_frames(reader: Box<dyn Read>) {
                 );
                 print_lossy(&frame.content);
             }
-            Err(e) => error!("frame error: {e}"),
+            Err(e) => info!("frame error: {e}"),
         }
     }
 }
@@ -412,7 +412,7 @@ fn run_raw(reader: Box<dyn Read>) {
                 );
                 print_lossy(&msg.content);
             }
-            Err(e) => error!("message error: {e}"),
+            Err(e) => info!("message error: {e}"),
         }
     }
 }
@@ -491,7 +491,7 @@ fn run_filtered(reader: Box<dyn Read>, mode: &OutputMode, filters: &CompiledFilt
                 }
                 output_message(mode, &msg);
             }
-            Err(e) => error!("parse error: {e}"),
+            Err(e) => info!("parse error: {e}"),
         }
     }
 }
@@ -511,7 +511,7 @@ fn run_dialog(reader: Box<dyn Read>, mode: &OutputMode, filters: &CompiledFilter
         let sip_msg = match result {
             Ok(m) => m,
             Err(e) => {
-                error!("message error: {e}");
+                info!("message error: {e}");
                 continue;
             }
         };
@@ -519,7 +519,7 @@ fn run_dialog(reader: Box<dyn Read>, mode: &OutputMode, filters: &CompiledFilter
         let parsed = match sip_msg.parse() {
             Ok(p) => p,
             Err(e) => {
-                error!("parse error: {e}");
+                info!("parse error: {e}");
                 continue;
             }
         };
@@ -585,7 +585,7 @@ fn run_dialog(reader: Box<dyn Read>, mode: &OutputMode, filters: &CompiledFilter
     for sip_msg in &matched_messages {
         match sip_msg.parse() {
             Ok(parsed) => output_message(mode, &parsed),
-            Err(e) => error!("parse error on output: {e}"),
+            Err(e) => info!("parse error on output: {e}"),
         }
     }
 }
