@@ -149,9 +149,9 @@ impl ParsedSipMessage {
     pub fn method(&self) -> Option<&str> {
         match &self.message_type {
             SipMessageType::Request { method, .. } => Some(method),
-            SipMessageType::Response { .. } => self
-                .cseq()
-                .and_then(|cs| cs.split_whitespace().nth(1)),
+            SipMessageType::Response { .. } => {
+                self.cseq().and_then(|cs| cs.split_whitespace().nth(1))
+            }
         }
     }
 

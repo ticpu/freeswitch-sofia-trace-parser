@@ -6,6 +6,12 @@ Build a Rust **library crate** + **CLI binary** that robustly parses FreeSWITCH 
 dump files. Multi-level architecture: raw text → segments → frames → SIP messages → dialogs.
 The library must handle all real-world edge cases and be reusable across multiple projects.
 
+**Streaming-first design**: The library accepts `impl Read`, making it composable with pipes
+and decompression. Primary use case: `xzcat dump.1.xz | app` where the consumer extracts
+content from SIP headers or body/multipart payloads. Incomplete first frames at the start of
+a stream are expected (rotated dump files, `xzgrep -C` extracts, mid-stream taps) and must
+be handled gracefully with a `tracing::warn!` notice, never a hard error.
+
 ## Existing Projects to Study
 
 **READ BOTH of these before starting. They contain hard-won production insights.**
@@ -131,11 +137,13 @@ body is 14 bytes, second NOTIFY starts immediately after without any separator.
 5. **Byte count validation**: `byte_count` in header should match content size.
    Use for validation but don't hard-fail on mismatch.
 
-6. **First frame in file**: May be partial (missing header) if file was truncated
-   or extracted with grep. Skip gracefully.
+6. **First frame in file**: May be partial (missing header) if file was truncated,
+   extracted with grep, or piped mid-stream. This is the **normal case** for rotated
+   dump files (`.dump.N.xz`). The parser skips to the first valid `\x0B\n` boundary
+   and emits `tracing::warn!("skipped N bytes of truncated first frame")`.
 
 7. **xz-compressed files**: Rotated dumps use xz. Library accepts `impl Read`,
-   callers handle decompression.
+   callers handle decompression (`xzcat dump.1.xz | app`).
 
 ## Architecture — Multi-Level Parsing
 
@@ -281,12 +289,24 @@ freeswitch-sofia-trace-parser --frames -vvv dump.log
 
 ## Sample Data
 
-Directory: `samples/`
+Directory: `samples/` (gitignored — contains PII from production)
 
-- `options_keepalive.dump` — simple recv/sent OPTIONS pairs (from production, IPv4+IPv6)
-- `abandoned_call_notify.dump` — multi-frame AbandonedCall NOTIFY (7 frames, ~8KB, real data)
+Production samples (raw binary format with `\x0B\n` boundaries, all start with truncated
+first frame). **Logrotate numbering**: `.dump` is current, `.dump.1` is previous,
+`.dump.2.xz` is older, etc. Higher number = older. `.dump.29` is the oldest here.
+
+- `esinet1-v4-tcp.dump.{20..29}` — TCP IPv4, ~340MB each, 484K+ frames per file
+- `esinet1-v4-udp.dump.{20..29}` — UDP IPv4, ~318MB each
+- `esinet1-v6-tls.dump.{20..29}` — TLS IPv6, ~293MB each (OPTIONS keepalives only)
+- `esinet1-v6-tls.dump.180` — TLS IPv6, 89MB, real traffic (INVITE/NOTIFY/SUBSCRIBE/BYE)
+- `esinet1-v4-tls.dump.{179,180}` — TLS IPv4, 85-159MB (180 has real traffic, 179 keepalives only)
+- `internal-v4.dump.{20..29}` — internal TCP IPv4 (10.x), ~54MB each
+- `internal-v6.dump.{20..29}` — internal TCP IPv6 (fd51::), ~74MB each
+- `options_keepalive.dump` — `cat -vE` formatted (NOT raw binary), for reference only
+- `abandoned_call_notify.dump` — `cat -vE` formatted (NOT raw binary), for reference only
 
 Larger test data (not in repo):
+
 - `/mnt/bcachefs/@home/jerome.poulin/GIT/freeswitch-database_utils/artifacts/debug.log`
   (13.8MB, 401 abandoned call events, created with `xzgrep -C 300`)
 - `/home/jerome.poulin/GIT/freeswitch-sip-trace-analyzer/siptraces/` (284-346MB full dumps)
@@ -330,8 +350,10 @@ Larger test data (not in repo):
 - Multipart MIME bodies
 
 **Integration tests with sample files**:
-- Parse `samples/options_keepalive.dump` → verify frame count, methods, addresses
-- Parse `samples/abandoned_call_notify.dump` → verify reassembly, extract incident_id + phone
+- Parse raw production dumps → verify frame counts, methods, addresses, transports
+- Multi-frame reassembly on TCP dumps → verify NOTIFY bodies reconstruct correctly
+- Truncated first frame → verify `tracing::warn!` emitted, parsing continues
+- Streaming from pipe (simulated with `Cursor`) → verify identical results to file read
 
 ## Project Setup
 
@@ -372,3 +394,4 @@ parseable with byte matching. Consumers bring their own regex for SIP content ex
 9. CLI binary with filter options
 10. Integration tests with sample files
 11. Test against large production dumps
+12. Generate synthetic PII-free sample files for the repo (committed to `tests/fixtures/`)

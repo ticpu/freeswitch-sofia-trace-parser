@@ -37,13 +37,20 @@ impl From<std::io::Error> for ParseError {
 
 use std::fmt;
 
+fn digit(b: u8) -> Option<u8> {
+    match b {
+        b'0'..=b'9' => Some(b - b'0'),
+        _ => None,
+    }
+}
+
 fn parse_u8(bytes: &[u8]) -> Option<u8> {
     if bytes.is_empty() || bytes.len() > 3 {
         return None;
     }
     let mut val: u8 = 0;
     for &b in bytes {
-        val = val.checked_mul(10)?.checked_add(b.checked_sub(b'0')?)?;
+        val = val.checked_mul(10)?.checked_add(digit(b)?)?;
     }
     Some(val)
 }
@@ -54,7 +61,7 @@ fn parse_u16(bytes: &[u8]) -> Option<u16> {
     }
     let mut val: u16 = 0;
     for &b in bytes {
-        val = val.checked_mul(10)?.checked_add(u16::from(b.checked_sub(b'0')?))?;
+        val = val.checked_mul(10)?.checked_add(u16::from(digit(b)?))?;
     }
     Some(val)
 }
@@ -65,7 +72,7 @@ fn parse_u32(bytes: &[u8]) -> Option<u32> {
     }
     let mut val: u32 = 0;
     for &b in bytes {
-        val = val.checked_mul(10)?.checked_add(u32::from(b.checked_sub(b'0')?))?;
+        val = val.checked_mul(10)?.checked_add(u32::from(digit(b)?))?;
     }
     Some(val)
 }
@@ -76,7 +83,7 @@ fn parse_usize(bytes: &[u8]) -> Option<usize> {
     }
     let mut val: usize = 0;
     for &b in bytes {
-        val = val.checked_mul(10)?.checked_add(usize::from(b.checked_sub(b'0')?))?;
+        val = val.checked_mul(10)?.checked_add(usize::from(digit(b)?))?;
     }
     Some(val)
 }
@@ -130,14 +137,17 @@ fn parse_time_part(bytes: &[u8]) -> Option<(u8, u8, u8, u32)> {
 /// `(recv|sent) <N> bytes (from|to) <transport>/<address> at <timestamp>:\n`
 ///
 /// Returns `(Frame header fields, header_len)` where header_len includes the trailing `\n`.
-pub fn parse_frame_header(data: &[u8]) -> Result<(Direction, usize, Transport, String, Timestamp, usize), ParseError> {
+pub fn parse_frame_header(
+    data: &[u8],
+) -> Result<(Direction, usize, Transport, String, Timestamp, usize), ParseError> {
     let newline_pos = memchr::memchr(b'\n', data)
         .ok_or_else(|| ParseError::InvalidHeader("no newline in header".into()))?;
     let line = &data[..newline_pos];
     // Strip trailing \r if present
     let line = line.strip_suffix(b"\r").unwrap_or(line);
     // Must end with ':'
-    let line = line.strip_suffix(b":")
+    let line = line
+        .strip_suffix(b":")
         .ok_or_else(|| ParseError::InvalidHeader("header does not end with ':'".into()))?;
 
     // Direction — both "recv " and "sent " are 5 bytes
@@ -146,7 +156,9 @@ pub fn parse_frame_header(data: &[u8]) -> Result<(Direction, usize, Transport, S
     } else if line.starts_with(b"sent ") {
         Direction::Sent
     } else {
-        return Err(ParseError::InvalidHeader("expected 'recv' or 'sent'".into()));
+        return Err(ParseError::InvalidHeader(
+            "expected 'recv' or 'sent'".into(),
+        ));
     };
     let mut pos = 5;
 
@@ -200,7 +212,14 @@ pub fn parse_frame_header(data: &[u8]) -> Result<(Direction, usize, Transport, S
     let timestamp = parse_timestamp(&line[pos..])
         .ok_or_else(|| ParseError::InvalidHeader("invalid timestamp".into()))?;
 
-    Ok((direction, byte_count, transport, address, timestamp, newline_pos + 1))
+    Ok((
+        direction,
+        byte_count,
+        transport,
+        address,
+        timestamp,
+        newline_pos + 1,
+    ))
 }
 
 /// Check if data at given position looks like a valid frame header start.
@@ -305,10 +324,7 @@ impl<R: Read> FrameIterator<R> {
                 let abs_pos = search_from + pos;
                 let after = abs_pos + 2;
                 if after < self.buf.len() && is_frame_header(&self.buf[after..]) {
-                    warn!(
-                        skipped_bytes = after,
-                        "skipped partial first frame"
-                    );
+                    warn!(skipped_bytes = after, "skipped partial first frame");
                     return Some(after);
                 }
                 search_from = abs_pos + 2;
@@ -361,29 +377,74 @@ impl<R: Read> Iterator for FrameIterator<R> {
             return None;
         }
 
-        // Parse frame header at current position
-        let header = match parse_frame_header(&self.buf) {
-            Ok(h) => h,
-            Err(e) => {
-                // Try to recover by finding next boundary
-                warn!(error = %e, "failed to parse frame header, attempting recovery");
-                if let Some(boundary) = self.find_boundary(0) {
-                    self.buf.drain(..boundary + 2);
-                    return self.next();
+        // Parse frame header — may need more data if header spans buffer boundary
+        let (direction, byte_count, transport, address, timestamp, header_len) = loop {
+            match parse_frame_header(&self.buf) {
+                Ok(h) => break h,
+                Err(ParseError::InvalidHeader(ref msg)) if msg == "no newline in header" => {
+                    if self.eof {
+                        debug!("truncated frame header at EOF");
+                        return None;
+                    }
+                    if let Err(e) = self.fill_buf() {
+                        return Some(Err(ParseError::Io(e)));
+                    }
                 }
-                return Some(Err(e));
+                Err(e) => {
+                    warn!(error = %e, "failed to parse frame header, attempting recovery");
+                    if let Some(boundary) = self.find_boundary(0) {
+                        self.buf.drain(..boundary + 2);
+                        return self.next();
+                    }
+                    return Some(Err(e));
+                }
             }
         };
 
-        let (direction, byte_count, transport, address, timestamp, header_len) = header;
         let content_start = header_len;
+        let expected_end = content_start + byte_count;
 
-        // Find the boundary for this frame
+        // Find the boundary for this frame.
+        // Strategy: first check at the expected position (content_start + byte_count),
+        // then fall back to scanning. This handles file concatenation where \x0B\n
+        // is followed by garbage from the next file's truncated first frame.
         loop {
+            // Ensure we have enough data to check the expected position
+            while self.buf.len() <= expected_end + 1 && !self.eof {
+                if let Err(e) = self.fill_buf() {
+                    return Some(Err(ParseError::Io(e)));
+                }
+            }
+
+            // Check at expected position first (byte_count hint)
+            if expected_end < self.buf.len() && self.buf[expected_end] == 0x0B {
+                let has_newline = expected_end + 1 < self.buf.len()
+                    && self.buf[expected_end + 1] == b'\n';
+                let at_eof = expected_end + 1 >= self.buf.len() && self.eof;
+
+                if has_newline || at_eof {
+                    let content = self.buf[content_start..expected_end].to_vec();
+                    let drain_to = if has_newline {
+                        expected_end + 2
+                    } else {
+                        expected_end + 1
+                    };
+                    self.buf.drain(..drain_to);
+                    self.frame_count += 1;
+                    return Some(Ok(Frame {
+                        direction,
+                        byte_count,
+                        transport,
+                        address,
+                        timestamp,
+                        content,
+                    }));
+                }
+            }
+
+            // Fall back to scanning for \x0B\n + valid header
             if let Some(boundary_pos) = self.find_boundary(content_start) {
-                // Content is between header end and \x0B
                 let content = self.buf[content_start..boundary_pos].to_vec();
-                // Consume up to and including \x0B\n
                 self.buf.drain(..boundary_pos + 2);
                 self.frame_count += 1;
 
@@ -408,7 +469,6 @@ impl<R: Read> Iterator for FrameIterator<R> {
 
             if self.eof {
                 // Last frame — no trailing \x0B\n
-                // Check if there's a \x0B at the very end (without \n)
                 let end = if self.buf.last() == Some(&0x0B) {
                     self.buf.len() - 1
                 } else {
@@ -437,7 +497,6 @@ impl<R: Read> Iterator for FrameIterator<R> {
                 }));
             }
 
-            // Need more data
             if let Err(e) = self.fill_buf() {
                 return Some(Err(ParseError::Io(e)));
             }
@@ -471,8 +530,7 @@ mod tests {
 
     #[test]
     fn parse_recv_ipv6_tcp() {
-        let header =
-            b"recv 1440 bytes from tcp/[2001:4958:10:14::4]:30046 at 13:03:21.674883:\n";
+        let header = b"recv 1440 bytes from tcp/[2001:4958:10:14::4]:30046 at 13:03:21.674883:\n";
         let (dir, count, transport, addr, ts, _) = parse_frame_header(header).unwrap();
         assert_eq!(dir, Direction::Recv);
         assert_eq!(count, 1440);
@@ -491,8 +549,7 @@ mod tests {
 
     #[test]
     fn parse_sent_ipv6_tcp() {
-        let header =
-            b"sent 681 bytes to tcp/[2001:4958:10:14::4]:30046 at 13:03:21.675500:\n";
+        let header = b"sent 681 bytes to tcp/[2001:4958:10:14::4]:30046 at 13:03:21.675500:\n";
         let (dir, count, transport, addr, _, _) = parse_frame_header(header).unwrap();
         assert_eq!(dir, Direction::Sent);
         assert_eq!(count, 681);
@@ -519,8 +576,7 @@ mod tests {
 
     #[test]
     fn parse_full_datetime_timestamp() {
-        let header =
-            b"recv 100 bytes from tcp/192.168.1.1:5060 at 2026-02-01 10:00:00.000000:\n";
+        let header = b"recv 100 bytes from tcp/192.168.1.1:5060 at 2026-02-01 10:00:00.000000:\n";
         let (_, _, _, _, ts, _) = parse_frame_header(header).unwrap();
         assert_eq!(
             ts,
@@ -539,13 +595,20 @@ mod tests {
     #[test]
     fn parse_invalid_header() {
         assert!(parse_frame_header(b"invalid header\n").is_err());
-        assert!(parse_frame_header(b"recv abc bytes from tcp/1.1.1.1:5060 at 00:00:00.000000:\n").is_err());
+        assert!(
+            parse_frame_header(b"recv abc bytes from tcp/1.1.1.1:5060 at 00:00:00.000000:\n")
+                .is_err()
+        );
     }
 
     #[test]
     fn is_frame_header_valid() {
-        assert!(is_frame_header(b"recv 100 bytes from tcp/1.1.1.1:5060 at 00:00:00.000000:\n"));
-        assert!(is_frame_header(b"sent 681 bytes to tcp/[::1]:5060 at 00:00:00.000000:\n"));
+        assert!(is_frame_header(
+            b"recv 100 bytes from tcp/1.1.1.1:5060 at 00:00:00.000000:\n"
+        ));
+        assert!(is_frame_header(
+            b"sent 681 bytes to tcp/[::1]:5060 at 00:00:00.000000:\n"
+        ));
         assert!(!is_frame_header(b"not a header"));
         assert!(!is_frame_header(b"recv abc bytes"));
         assert!(!is_frame_header(b""));
@@ -615,11 +678,106 @@ mod tests {
         let mut data = Vec::new();
         data.extend_from_slice(b"partial garbage data");
         data.extend_from_slice(b"\x0B\n");
-        data.extend_from_slice(b"recv 5 bytes from tcp/1.1.1.1:5060 at 00:00:00.000000:\nhello\x0B\n");
+        data.extend_from_slice(
+            b"recv 5 bytes from tcp/1.1.1.1:5060 at 00:00:00.000000:\nhello\x0B\n",
+        );
         let frames: Vec<Frame> = FrameIterator::new(&data[..])
             .collect::<Result<Vec<_>, _>>()
             .unwrap();
         assert_eq!(frames.len(), 1);
         assert_eq!(frames[0].content, b"hello");
+    }
+
+    #[test]
+    fn frame_iterator_truncated_last_frame() {
+        // Complete frame followed by truncated frame at EOF (no \x0B\n)
+        let mut data = Vec::new();
+        data.extend_from_slice(
+            b"recv 5 bytes from tcp/1.1.1.1:5060 at 00:00:00.000000:\nhello\x0B\n",
+        );
+        data.extend_from_slice(
+            b"sent 3 bytes to tcp/1.1.1.1:5060 at 00:00:01.000000:\nbye",
+        );
+        let frames: Vec<Frame> = FrameIterator::new(&data[..])
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert_eq!(frames.len(), 2);
+        assert_eq!(frames[0].content, b"hello");
+        assert_eq!(frames[1].content, b"bye");
+    }
+
+    #[test]
+    fn frame_iterator_file_concatenation() {
+        // Simulates `cat dump.20 dump.21 | parser`
+        // File 1: truncated start + valid frame + complete end
+        // File 2: truncated start (no header) + valid frame
+        let mut data = Vec::new();
+
+        // File 1: starts with valid header
+        data.extend_from_slice(
+            b"recv 5 bytes from tcp/1.1.1.1:5060 at 00:00:00.000000:\nhello\x0B\n",
+        );
+        data.extend_from_slice(
+            b"sent 5 bytes to tcp/1.1.1.1:5060 at 00:00:00.000001:\nworld\x0B\n",
+        );
+
+        // File 2: starts with truncated frame data (no header), then boundary, then valid frame
+        data.extend_from_slice(b"some truncated SIP content from previous rotation\r\n\r\n");
+        data.extend_from_slice(b"\x0B\n");
+        data.extend_from_slice(
+            b"recv 3 bytes from tcp/2.2.2.2:5060 at 01:00:00.000000:\nfoo\x0B\n",
+        );
+
+        let frames: Vec<Frame> = FrameIterator::new(&data[..])
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert_eq!(frames.len(), 3);
+        assert_eq!(frames[0].content, b"hello");
+        assert_eq!(frames[1].content, b"world");
+        assert_eq!(frames[2].content, b"foo");
+        assert_eq!(frames[2].address, "2.2.2.2:5060");
+    }
+
+    #[test]
+    fn frame_iterator_file_concatenation_mid_stream_garbage() {
+        // The join point between files produces garbage that looks like:
+        // ...last_content\x0B\ntruncated_first_of_next_file\x0B\nvalid_header...
+        // The truncated part is NOT a valid header, so recovery should skip it
+        let mut data = Vec::new();
+
+        // Last frame of file 1
+        data.extend_from_slice(
+            b"recv 5 bytes from tcp/1.1.1.1:5060 at 00:00:00.000000:\nhello\x0B\n",
+        );
+
+        // Truncated first frame of file 2 (mid-SIP content, no frame header)
+        data.extend_from_slice(b"Content-Type: application/sdp\r\n\r\nv=0\r\n");
+        data.extend_from_slice(b"\x0B\n");
+
+        // Valid second frame of file 2
+        data.extend_from_slice(
+            b"sent 3 bytes to tcp/3.3.3.3:5060 at 02:00:00.000000:\nbar\x0B\n",
+        );
+
+        let frames: Vec<Frame> = FrameIterator::new(&data[..])
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert_eq!(frames.len(), 2);
+        assert_eq!(frames[0].content, b"hello");
+        assert_eq!(frames[1].content, b"bar");
+    }
+
+    #[test]
+    fn frame_iterator_empty_input() {
+        let data: &[u8] = b"";
+        let frames: Vec<Result<Frame, ParseError>> = FrameIterator::new(data).collect();
+        assert!(frames.is_empty());
+    }
+
+    #[test]
+    fn frame_iterator_only_garbage() {
+        let data = b"this is not a SIP trace dump at all, just garbage text";
+        let frames: Vec<Result<Frame, ParseError>> = FrameIterator::new(&data[..]).collect();
+        assert!(frames.is_empty());
     }
 }
