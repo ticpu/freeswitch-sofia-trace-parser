@@ -1,8 +1,13 @@
+use std::sync::LazyLock;
+
 use memchr::memmem;
 
 use crate::frame::ParseError;
 use crate::message::MessageIterator;
 use crate::types::{MimePart, ParsedSipMessage, SipMessage, SipMessageType};
+
+static CRLF: LazyLock<memmem::Finder<'static>> = LazyLock::new(|| memmem::Finder::new(b"\r\n"));
+static CRLFCRLF: LazyLock<memmem::Finder<'static>> = LazyLock::new(|| memmem::Finder::new(b"\r\n\r\n"));
 
 impl SipMessage {
     pub fn parse(&self) -> Result<ParsedSipMessage, ParseError> {
@@ -38,14 +43,14 @@ fn parse_sip_message(msg: &SipMessage) -> Result<ParsedSipMessage, ParseError> {
     let content = &msg.content;
 
     // Find end of first line
-    let first_line_end = memmem::find(content, b"\r\n")
+    let first_line_end = CRLF.find(content)
         .ok_or_else(|| ParseError::InvalidHeader("no CRLF in SIP message".into()))?;
     let first_line = &content[..first_line_end];
 
     let message_type = parse_first_line(first_line)?;
 
     // Find end of headers
-    let header_end = memmem::find(content, b"\r\n\r\n");
+    let header_end = CRLFCRLF.find(content);
     let (headers, body) = match header_end {
         Some(pos) => {
             let header_bytes = &content[first_line_end + 2..pos];
@@ -93,7 +98,7 @@ fn parse_status_line(line: &[u8]) -> Result<SipMessageType, ParseError> {
         .map_err(|_| ParseError::InvalidHeader("invalid status code".into()))?;
 
     let reason = &after_version[space + 1..];
-    let reason = String::from_utf8_lossy(reason).into_owned();
+    let reason = bytes_to_string(reason);
 
     Ok(SipMessageType::Response { code, reason })
 }
@@ -116,10 +121,17 @@ fn parse_request_line(line: &[u8]) -> Result<SipMessageType, ParseError> {
     }
     let uri = &rest[..last_space];
 
-    let method = String::from_utf8_lossy(method).into_owned();
-    let uri = String::from_utf8_lossy(uri).into_owned();
+    let method = bytes_to_string(method);
+    let uri = bytes_to_string(uri);
 
     Ok(SipMessageType::Request { method, uri })
+}
+
+fn bytes_to_string(b: &[u8]) -> String {
+    match std::str::from_utf8(b) {
+        Ok(s) => s.to_owned(),
+        Err(_) => String::from_utf8_lossy(b).into_owned(),
+    }
 }
 
 fn parse_headers(data: &[u8]) -> Vec<(String, String)> {
@@ -130,13 +142,13 @@ fn parse_headers(data: &[u8]) -> Vec<(String, String)> {
 
     let mut pos = 0;
     while pos < data.len() {
-        let line_end = memmem::find(&data[pos..], b"\r\n").unwrap_or(data.len() - pos);
+        let line_end = CRLF.find(&data[pos..]).unwrap_or(data.len() - pos);
         let mut line = &data[pos..pos + line_end];
         pos += line_end + 2; // skip \r\n
 
         // Handle header folding (continuation lines start with SP or HT)
         while pos < data.len() && (data[pos] == b' ' || data[pos] == b'\t') {
-            let next_end = memmem::find(&data[pos..], b"\r\n").unwrap_or(data.len() - pos);
+            let next_end = CRLF.find(&data[pos..]).unwrap_or(data.len() - pos);
             // Extend line to include continuation
             line = &data[line.as_ptr() as usize - data.as_ptr() as usize..pos + next_end];
             pos += next_end + 2;
@@ -153,10 +165,7 @@ fn parse_headers(data: &[u8]) -> Vec<(String, String)> {
             } else {
                 &[]
             };
-            headers.push((
-                String::from_utf8_lossy(name).into_owned(),
-                String::from_utf8_lossy(value).into_owned(),
-            ));
+            headers.push((bytes_to_string(name), bytes_to_string(value)));
         }
     }
 

@@ -128,6 +128,67 @@ Tested against 53 production dump files (~5.5GB) from FreeSWITCH NG-911 infrastr
 - Multipart body splitting: 1,208 multipart messages, 2,414 parts (SDP + PIDF), 0 failures
 - File concatenation (`cat dump.29 dump.28 |`): 965,515 frames, zero mismatches
 
+## CLI Tool
+
+```sh
+# One-line summary of all messages
+freeswitch-sofia-trace-parser profile.dump
+
+# Pipe from xzcat
+xzcat profile.dump.1.xz | freeswitch-sofia-trace-parser
+
+# Exclude OPTIONS keepalives (and their 200 OK responses)
+freeswitch-sofia-trace-parser -x OPTIONS profile.dump
+
+# Filter by method — shows INVITE requests and their 100/180/200 responses
+freeswitch-sofia-trace-parser -m INVITE profile.dump
+
+# Filter by Call-ID regex
+freeswitch-sofia-trace-parser -c '6fba3e7e-dddf' profile.dump
+
+# Header regex — all sent INVITEs from a specific extension
+freeswitch-sofia-trace-parser -m INVITE -d sent -H 'From=Extension 1583' profile.dump
+
+# Extract SDP body from a specific call's INVITEs
+freeswitch-sofia-trace-parser -c '6fba3e7e' -m INVITE -d sent --body profile.dump
+
+# Full SIP message output
+freeswitch-sofia-trace-parser -c '6fba3e7e' --full profile.dump
+
+# Statistics: method and status code distribution
+freeswitch-sofia-trace-parser --stats profile.dump
+
+# Multiple files (concatenated in order)
+freeswitch-sofia-trace-parser profile.dump.2 profile.dump.1 profile.dump
+
+# Raw frames (level 1) or reassembled messages (level 2)
+freeswitch-sofia-trace-parser --frames profile.dump
+freeswitch-sofia-trace-parser --raw profile.dump
+```
+
+### Filter options
+
+| Flag | Description |
+|---|---|
+| `-m, --method <VERB>` | Include method (request + responses via CSeq), repeatable |
+| `-x, --exclude <VERB>` | Exclude method (request + responses), repeatable |
+| `-c, --call-id <REGEX>` | Match Call-ID by regex |
+| `-d, --direction <DIR>` | Filter by direction (`recv`/`sent`) |
+| `-a, --address <REGEX>` | Match address by regex |
+| `-H, --header <NAME=REGEX>` | Match header value by regex, repeatable |
+
+### Output modes
+
+| Flag | Description |
+|---|---|
+| *(default)* | One-line summary per message |
+| `--full` | Full SIP message with metadata header |
+| `--headers` | Headers only, no body |
+| `--body` | Body only (for SDP/PIDF extraction) |
+| `--raw` | Raw reassembled bytes (level 2) |
+| `--frames` | Raw frames (level 1) |
+| `--stats` | Method and status code distribution |
+
 ## Building
 
 ```sh

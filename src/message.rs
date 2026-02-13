@@ -1,8 +1,13 @@
+use std::sync::LazyLock;
+
 use memchr::memmem;
 use tracing::{debug, trace};
 
 use crate::frame::{FrameIterator, ParseError};
 use crate::types::{Frame, SipMessage, Transport};
+
+static CRLF: LazyLock<memmem::Finder<'static>> = LazyLock::new(|| memmem::Finder::new(b"\r\n"));
+static CRLFCRLF: LazyLock<memmem::Finder<'static>> = LazyLock::new(|| memmem::Finder::new(b"\r\n\r\n"));
 
 pub struct MessageIterator<R> {
     frames: FrameIterator<R>,
@@ -115,15 +120,12 @@ impl<R: std::io::Read> Iterator for MessageIterator<R> {
 /// Find Content-Length header value in SIP message bytes.
 /// Returns the value as usize if found.
 fn find_content_length(data: &[u8]) -> Option<usize> {
-    // Look for Content-Length: or l: (compact form) in headers
-    // Headers end at \r\n\r\n
-    let header_end = memmem::find(data, b"\r\n\r\n")?;
+    let header_end = CRLFCRLF.find(data)?;
     let headers = &data[..header_end];
 
-    // Search for "Content-Length:" (case-insensitive) or compact "l:"
     let mut pos = 0;
     while pos < headers.len() {
-        let line_end = memmem::find(&headers[pos..], b"\r\n").unwrap_or(headers.len() - pos);
+        let line_end = CRLF.find(&headers[pos..]).unwrap_or(headers.len() - pos);
         let line = &headers[pos..pos + line_end];
 
         if let Some(value) = extract_header_value(line, b"Content-Length") {
@@ -206,8 +208,7 @@ fn split_aggregated(content: &[u8]) -> Vec<usize> {
     let mut pos = 0;
 
     loop {
-        // Find headers end
-        let header_end = match memmem::find(&content[pos..], b"\r\n\r\n") {
+        let header_end = match CRLFCRLF.find(&content[pos..]) {
             Some(offset) => pos + offset,
             None => {
                 boundaries.push(content.len());
