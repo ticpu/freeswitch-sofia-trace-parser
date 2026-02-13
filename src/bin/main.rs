@@ -12,6 +12,13 @@ use freeswitch_sofia_trace_parser::{
     FrameIterator, MessageIterator, ParsedMessageIterator, ParsedSipMessage, SipMessage,
 };
 
+enum OutputMode {
+    Summary,
+    Full,
+    Headers,
+    Body,
+}
+
 #[derive(Parser)]
 #[command(
     name = "freeswitch-sofia-trace-parser",
@@ -243,6 +250,18 @@ fn compile_filters(cli: &Cli) -> CompiledFilters {
     }
 }
 
+fn output_mode(cli: &Cli) -> OutputMode {
+    if cli.full {
+        OutputMode::Full
+    } else if cli.headers {
+        OutputMode::Headers
+    } else if cli.body {
+        OutputMode::Body
+    } else {
+        OutputMode::Summary
+    }
+}
+
 fn open_input(files: &[String]) -> Box<dyn Read> {
     if files.is_empty() || (files.len() == 1 && files[0] == "-") {
         return Box::new(io::stdin().lock());
@@ -290,47 +309,38 @@ fn init_tracing(verbose: u8) {
         .init();
 }
 
+fn print_lossy(bytes: &[u8]) {
+    let s = String::from_utf8_lossy(bytes);
+    print!("{s}");
+    if !s.ends_with('\n') {
+        println!();
+    }
+}
+
 fn format_summary(msg: &ParsedSipMessage) -> String {
-    let method_or_status = match &msg.message_type {
-        SipMessageType::Request { method, .. } => method.clone(),
-        SipMessageType::Response { code, reason, .. } => format!("{code} {reason}"),
-    };
     let call_id = msg.call_id().unwrap_or("-");
     format!(
         "{} {} {}/{} {} {}",
-        msg.timestamp, msg.direction, msg.transport, msg.address, method_or_status, call_id
+        msg.timestamp, msg.direction, msg.transport, msg.address, msg.message_type.summary(), call_id
     )
 }
 
 fn format_frame_header(msg: &ParsedSipMessage) -> String {
-    let prep = match msg.direction {
-        Direction::Recv => "from",
-        Direction::Sent => "to",
-    };
-    let method_or_status = match &msg.message_type {
-        SipMessageType::Request { method, .. } => method.clone(),
-        SipMessageType::Response { code, reason, .. } => format!("{code} {reason}"),
-    };
     format!(
         "{} {} {}/{} at {} ({} frames) {}",
         msg.direction,
-        prep,
+        msg.direction.preposition(),
         msg.transport,
         msg.address,
         msg.timestamp,
         msg.frame_count,
-        method_or_status,
+        msg.message_type.summary(),
     )
 }
 
 fn output_full(msg: &ParsedSipMessage) {
     println!("{}", format_frame_header(msg));
-    let rebuilt = msg.to_bytes();
-    let content_str = String::from_utf8_lossy(&rebuilt);
-    print!("{content_str}");
-    if !content_str.ends_with('\n') {
-        println!();
-    }
+    print_lossy(&msg.to_bytes());
 }
 
 fn output_headers(msg: &ParsedSipMessage) {
@@ -350,23 +360,16 @@ fn output_headers(msg: &ParsedSipMessage) {
 
 fn output_body(msg: &ParsedSipMessage) {
     if !msg.body.is_empty() {
-        let body_str = String::from_utf8_lossy(&msg.body);
-        print!("{body_str}");
-        if !body_str.ends_with('\n') {
-            println!();
-        }
+        print_lossy(&msg.body);
     }
 }
 
-fn output_message(cli: &Cli, msg: &ParsedSipMessage) {
-    if cli.full {
-        output_full(msg);
-    } else if cli.headers {
-        output_headers(msg);
-    } else if cli.body {
-        output_body(msg);
-    } else {
-        println!("{}", format_summary(msg));
+fn output_message(mode: &OutputMode, msg: &ParsedSipMessage) {
+    match mode {
+        OutputMode::Summary => println!("{}", format_summary(msg)),
+        OutputMode::Full => output_full(msg),
+        OutputMode::Headers => output_headers(msg),
+        OutputMode::Body => output_body(msg),
     }
 }
 
@@ -374,24 +377,16 @@ fn run_frames(reader: Box<dyn Read>) {
     for result in FrameIterator::new(reader) {
         match result {
             Ok(frame) => {
-                let prep = match frame.direction {
-                    Direction::Recv => "from",
-                    Direction::Sent => "to",
-                };
                 println!(
                     "{} {} bytes {} {}/{} at {}",
                     frame.direction,
                     frame.byte_count,
-                    prep,
+                    frame.direction.preposition(),
                     frame.transport,
                     frame.address,
                     frame.timestamp,
                 );
-                let content_str = String::from_utf8_lossy(&frame.content);
-                print!("{content_str}");
-                if !content_str.ends_with('\n') {
-                    println!();
-                }
+                print_lossy(&frame.content);
             }
             Err(e) => error!("frame error: {e}"),
         }
@@ -402,25 +397,17 @@ fn run_raw(reader: Box<dyn Read>) {
     for result in MessageIterator::new(reader) {
         match result {
             Ok(msg) => {
-                let prep = match msg.direction {
-                    Direction::Recv => "from",
-                    Direction::Sent => "to",
-                };
                 println!(
                     "{} {} {}/{} at {} ({} frames, {} bytes)",
                     msg.direction,
-                    prep,
+                    msg.direction.preposition(),
                     msg.transport,
                     msg.address,
                     msg.timestamp,
                     msg.frame_count,
                     msg.content.len(),
                 );
-                let content_str = String::from_utf8_lossy(&msg.content);
-                print!("{content_str}");
-                if !content_str.ends_with('\n') {
-                    println!();
-                }
+                print_lossy(&msg.content);
             }
             Err(e) => error!("message error: {e}"),
         }
@@ -492,14 +479,14 @@ fn run_stats(reader: Box<dyn Read>, filters: &CompiledFilters) {
     }
 }
 
-fn run_filtered(reader: Box<dyn Read>, cli: &Cli, filters: &CompiledFilters) {
+fn run_filtered(reader: Box<dyn Read>, mode: &OutputMode, filters: &CompiledFilters) {
     for result in ParsedMessageIterator::new(reader) {
         match result {
             Ok(msg) => {
                 if !filters.matches(&msg) {
                     continue;
                 }
-                output_message(cli, &msg);
+                output_message(mode, &msg);
             }
             Err(e) => error!("parse error: {e}"),
         }
@@ -513,7 +500,7 @@ struct DialogState {
     saw_bye_response: bool,
 }
 
-fn run_dialog(reader: Box<dyn Read>, cli: &Cli, filters: &CompiledFilters) {
+fn run_dialog(reader: Box<dyn Read>, mode: &OutputMode, filters: &CompiledFilters) {
     let mut dialogs: HashMap<String, DialogState> = HashMap::new();
 
     // Single pass: collect messages by Call-ID, track matches
@@ -596,7 +583,7 @@ fn run_dialog(reader: Box<dyn Read>, cli: &Cli, filters: &CompiledFilters) {
 
     for sip_msg in &matched_messages {
         match sip_msg.parse() {
-            Ok(parsed) => output_message(cli, &parsed),
+            Ok(parsed) => output_message(mode, &parsed),
             Err(e) => error!("parse error on output: {e}"),
         }
     }
@@ -627,9 +614,10 @@ fn main() {
     }
 
     let filters = compile_filters(&cli);
+    let mode = output_mode(&cli);
 
     if cli.dialog {
-        run_dialog(open_input(&cli.files), &cli, &filters);
+        run_dialog(open_input(&cli.files), &mode, &filters);
         return;
     }
 
@@ -640,5 +628,5 @@ fn main() {
         return;
     }
 
-    run_filtered(reader, &cli, &filters);
+    run_filtered(reader, &mode, &filters);
 }

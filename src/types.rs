@@ -16,6 +16,15 @@ impl fmt::Display for Direction {
     }
 }
 
+impl Direction {
+    pub fn preposition(&self) -> &'static str {
+        match self {
+            Direction::Recv => "from",
+            Direction::Sent => "to",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Transport {
     Tcp,
@@ -132,6 +141,15 @@ impl fmt::Display for SipMessageType {
         match self {
             SipMessageType::Request { method, uri } => write!(f, "{method} {uri}"),
             SipMessageType::Response { code, reason } => write!(f, "{code} {reason}"),
+        }
+    }
+}
+
+impl SipMessageType {
+    pub fn summary(&self) -> Cow<'_, str> {
+        match self {
+            SipMessageType::Request { method, .. } => Cow::Borrowed(method),
+            SipMessageType::Response { code, reason } => Cow::Owned(format!("{code} {reason}")),
         }
     }
 }
