@@ -1,7 +1,7 @@
 use std::io::Read;
 
 use memchr::memmem;
-use tracing::{debug, trace, warn};
+use tracing::{debug, info, trace, warn};
 
 use crate::types::{Direction, Frame, Timestamp, Transport};
 
@@ -393,11 +393,43 @@ impl<R: Read> Iterator for FrameIterator<R> {
                     }
                 }
                 Err(e) => {
-                    warn!(error = %e, "failed to parse frame header, attempting recovery");
-                    if let Some(boundary) = self.find_boundary(0) {
-                        self.buf.drain(..boundary + 2);
+                    let header_preview: String = self
+                        .buf
+                        .iter()
+                        .take(200)
+                        .take_while(|&&b| b != b'\n')
+                        .map(|&b| {
+                            if b.is_ascii_graphic() || b == b' ' {
+                                b as char
+                            } else {
+                                '.'
+                            }
+                        })
+                        .collect();
+                    let is_dump_marker = header_preview.starts_with("dump started at ");
+                    if let Some(skip) = self.find_boundary(0).map(|b| b + 2) {
+                        if is_dump_marker {
+                            info!(
+                                header = %header_preview,
+                                skipped_bytes = skip,
+                                "skipped dump restart marker",
+                            );
+                        } else {
+                            warn!(
+                                error = %e,
+                                header = %header_preview,
+                                skipped_bytes = skip,
+                                "skipped invalid frame header, recovered",
+                            );
+                        }
+                        self.buf.drain(..skip);
                         return self.next();
                     }
+                    warn!(
+                        error = %e,
+                        header = %header_preview,
+                        "failed to parse frame header, recovery failed",
+                    );
                     return Some(Err(e));
                 }
             }
