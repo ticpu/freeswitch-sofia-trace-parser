@@ -7,7 +7,8 @@ use crate::message::MessageIterator;
 use crate::types::{MimePart, ParsedSipMessage, SipMessage, SipMessageType};
 
 static CRLF: LazyLock<memmem::Finder<'static>> = LazyLock::new(|| memmem::Finder::new(b"\r\n"));
-static CRLFCRLF: LazyLock<memmem::Finder<'static>> = LazyLock::new(|| memmem::Finder::new(b"\r\n\r\n"));
+static CRLFCRLF: LazyLock<memmem::Finder<'static>> =
+    LazyLock::new(|| memmem::Finder::new(b"\r\n\r\n"));
 
 impl SipMessage {
     pub fn parse(&self) -> Result<ParsedSipMessage, ParseError> {
@@ -43,7 +44,8 @@ fn parse_sip_message(msg: &SipMessage) -> Result<ParsedSipMessage, ParseError> {
     let content = &msg.content;
 
     // Find end of first line
-    let first_line_end = CRLF.find(content)
+    let first_line_end = CRLF
+        .find(content)
         .ok_or_else(|| ParseError::InvalidHeader("no CRLF in SIP message".into()))?;
     let first_line = &content[..first_line_end];
 
@@ -177,7 +179,10 @@ fn parse_headers(data: &[u8]) -> Vec<(String, String)> {
 }
 
 fn trim_header_value(b: &[u8]) -> &[u8] {
-    let start = b.iter().position(|&c| c != b' ' && c != b'\t').unwrap_or(b.len());
+    let start = b
+        .iter()
+        .position(|&c| c != b' ' && c != b'\t')
+        .unwrap_or(b.len());
     &b[start..]
 }
 
@@ -241,7 +246,6 @@ fn parse_multipart_body(body: &[u8], boundary: &str) -> Vec<MimePart> {
     }
 
     while let Some(next) = memmem::find(&body[pos..], open_bytes) {
-
         // Part content: strip trailing CRLF before delimiter
         let mut end = pos + next;
         if end >= 2 && body[end - 2] == b'\r' && body[end - 1] == b'\n' {
@@ -655,10 +659,7 @@ mod tests {
             .iter()
             .find(|(k, _)| k == "Contact")
             .map(|(_, v)| v.as_str());
-        assert_eq!(
-            contact,
-            Some("<sip:user@10.0.0.1:5060;transport=tcp>")
-        );
+        assert_eq!(contact, Some("<sip:user@10.0.0.1:5060;transport=tcp>"));
     }
 
     #[test]
@@ -675,7 +676,8 @@ mod tests {
 
     #[test]
     fn parsed_message_iterator() {
-        let content = b"OPTIONS sip:host SIP/2.0\r\nCall-ID: iter-test\r\nContent-Length: 0\r\n\r\n";
+        let content =
+            b"OPTIONS sip:host SIP/2.0\r\nCall-ID: iter-test\r\nContent-Length: 0\r\n\r\n";
         let header = format!(
             "recv {} bytes from udp/10.0.0.1:5060 at 00:00:00.000000:\n",
             content.len()
@@ -726,10 +728,7 @@ mod tests {
         let pidf = b"<?xml version=\"1.0\"?>\r\n<presence xmlns=\"urn:ietf:params:xml:ns:pidf\"/>";
         let msg = make_multipart_invite(
             "unique-boundary-1",
-            &[
-                ("application/sdp", sdp),
-                ("application/pidf+xml", pidf),
-            ],
+            &[("application/sdp", sdp), ("application/pidf+xml", pidf)],
         );
         let parsed = msg.parse().unwrap();
 
@@ -758,23 +757,22 @@ mod tests {
             "ng911-boundary",
             &[
                 ("application/sdp", sdp),
-                (
-                    "application/emergencyCallData.eido+xml",
-                    eido,
-                ),
+                ("application/emergencyCallData.eido+xml", eido),
             ],
         );
         let parsed = msg.parse().unwrap();
         let parts = parsed.body_parts().unwrap();
         assert_eq!(parts.len(), 2);
 
-        let sdp_part = parts.iter().find(|p| p.content_type() == Some("application/sdp"));
+        let sdp_part = parts
+            .iter()
+            .find(|p| p.content_type() == Some("application/sdp"));
         assert!(sdp_part.is_some());
         assert_eq!(sdp_part.unwrap().body, sdp);
 
         let eido_part = parts
             .iter()
-            .find(|p| p.content_type().map_or(false, |ct| ct.contains("eido")));
+            .find(|p| p.content_type().is_some_and(|ct| ct.contains("eido")));
         assert!(eido_part.is_some());
         assert_eq!(eido_part.unwrap().body, eido);
     }
@@ -820,9 +818,8 @@ mod tests {
         let mut content = Vec::new();
         content.extend_from_slice(b"INVITE sip:host SIP/2.0\r\n");
         content.extend_from_slice(b"Call-ID: quoted-bnd@host\r\n");
-        content.extend_from_slice(
-            b"Content-Type: multipart/mixed; boundary=\"quoted-boundary\"\r\n",
-        );
+        content
+            .extend_from_slice(b"Content-Type: multipart/mixed; boundary=\"quoted-boundary\"\r\n");
         content.extend_from_slice(format!("Content-Length: {}\r\n", body.len()).as_bytes());
         content.extend_from_slice(b"\r\n");
         content.extend_from_slice(&body);
@@ -869,9 +866,7 @@ mod tests {
 
         let mut body = Vec::new();
         body.extend_from_slice(b"--hdr-boundary\r\n");
-        body.extend_from_slice(
-            b"Content-Type: application/emergencyCallData.eido+xml\r\n",
-        );
+        body.extend_from_slice(b"Content-Type: application/emergencyCallData.eido+xml\r\n");
         body.extend_from_slice(b"Content-ID: <eido@example.com>\r\n");
         body.extend_from_slice(b"Content-Disposition: by-reference\r\n");
         body.extend_from_slice(b"\r\n");

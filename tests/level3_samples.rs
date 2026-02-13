@@ -292,10 +292,7 @@ fn tcp_multipart_bodies() {
             Some(parts) => {
                 total_parts += parts.len();
                 for part in &parts {
-                    let ct = part
-                        .content_type()
-                        .unwrap_or("(none)")
-                        .to_string();
+                    let ct = part.content_type().unwrap_or("(none)").to_string();
                     *ct_distribution.entry(ct).or_default() += 1;
                 }
             }
@@ -303,9 +300,7 @@ fn tcp_multipart_bodies() {
         }
     }
 
-    eprintln!(
-        "  total parts: {total_parts}, parse failures: {parse_failures}"
-    );
+    eprintln!("  total parts: {total_parts}, parse failures: {parse_failures}");
 
     let mut sorted: Vec<_> = ct_distribution.into_iter().collect();
     sorted.sort_by(|a, b| b.1.cmp(&a.1));
@@ -349,7 +344,7 @@ fn tls_v6_multipart_bodies() {
                 has_sdp += 1;
             }
             if parts.iter().any(|p| {
-                p.content_type().map_or(false, |ct| {
+                p.content_type().is_some_and(|ct| {
                     ct.contains("pidf") || ct.contains("eido") || ct.contains("xml")
                 })
             }) {
