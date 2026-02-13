@@ -379,6 +379,27 @@ impl<R: Read> Iterator for FrameIterator<R> {
             return None;
         }
 
+        // Strip inter-frame newline padding (\n or \r\n between frames)
+        let mut strip = 0;
+        while strip < self.buf.len() {
+            if self.buf[strip] == b'\n' {
+                strip += 1;
+            } else if strip + 1 < self.buf.len()
+                && self.buf[strip] == b'\r'
+                && self.buf[strip + 1] == b'\n'
+            {
+                strip += 2;
+            } else {
+                break;
+            }
+        }
+        if strip > 0 {
+            self.buf.drain(..strip);
+            if self.buf.is_empty() {
+                return self.next();
+            }
+        }
+
         // Parse frame header — may need more data if header spans buffer boundary
         let (direction, byte_count, transport, address, timestamp, header_len) = loop {
             match parse_frame_header(&self.buf) {
@@ -408,7 +429,13 @@ impl<R: Read> Iterator for FrameIterator<R> {
                         .collect();
                     if header_preview.starts_with("dump started at ") {
                         let skip = memchr::memchr(b'\n', &self.buf)
-                            .map(|p| p + 1)
+                            .map(|p| {
+                                let mut end = p + 1;
+                                while end < self.buf.len() && self.buf[end] == b'\n' {
+                                    end += 1;
+                                }
+                                end
+                            })
                             .unwrap_or(self.buf.len());
                         info!(
                             header = %header_preview,
@@ -873,13 +900,13 @@ mod tests {
 
     #[test]
     fn frame_iterator_dump_marker_at_eof() {
-        // A dump restart marker at the end of input (no boundary after it)
+        // A dump restart marker at the end of input (with trailing \n\n as in real dumps)
         // should be silently consumed, not returned as an error.
         let mut data = Vec::new();
         data.extend_from_slice(
             b"recv 5 bytes from tcp/1.1.1.1:5060 at 00:00:00.000000:\nhello\x0B\n",
         );
-        data.extend_from_slice(b"dump started at Thu Aug 22 11:38:11 2024\n");
+        data.extend_from_slice(b"dump started at Thu Aug 22 11:38:11 2024\n\n\n");
 
         let frames: Vec<Result<Frame, ParseError>> = FrameIterator::new(&data[..]).collect();
         assert_eq!(frames.len(), 1);
@@ -889,13 +916,13 @@ mod tests {
 
     #[test]
     fn frame_iterator_dump_marker_mid_stream() {
-        // A dump restart marker between two valid frames should be skipped,
-        // and both frames should parse successfully.
+        // A dump restart marker between two valid frames (with trailing \n\n as in real dumps)
+        // should be skipped, and both frames should parse successfully.
         let mut data = Vec::new();
         data.extend_from_slice(
             b"recv 5 bytes from tcp/1.1.1.1:5060 at 00:00:00.000000:\nhello\x0B\n",
         );
-        data.extend_from_slice(b"dump started at Thu Aug 22 11:38:11 2024\n");
+        data.extend_from_slice(b"dump started at Thu Aug 22 11:38:11 2024\n\n\n");
         data.extend_from_slice(b"sent 3 bytes to tcp/2.2.2.2:5060 at 00:00:01.000000:\nbye\x0B\n");
 
         let frames: Vec<Result<Frame, ParseError>> = FrameIterator::new(&data[..]).collect();
