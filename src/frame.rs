@@ -406,31 +406,33 @@ impl<R: Read> Iterator for FrameIterator<R> {
                             }
                         })
                         .collect();
-                    let is_dump_marker = header_preview.starts_with("dump started at ");
-                    if let Some(skip) = self.find_boundary(0).map(|b| b + 2) {
-                        if is_dump_marker {
-                            info!(
-                                header = %header_preview,
-                                skipped_bytes = skip,
-                                "skipped dump restart marker",
-                            );
-                        } else {
-                            warn!(
-                                error = %e,
-                                header = %header_preview,
-                                skipped_bytes = skip,
-                                "skipped invalid frame header, recovered",
-                            );
-                        }
+                    if header_preview.starts_with("dump started at ") {
+                        let skip = memchr::memchr(b'\n', &self.buf)
+                            .map(|p| p + 1)
+                            .unwrap_or(self.buf.len());
+                        info!(
+                            header = %header_preview,
+                            skipped_bytes = skip,
+                            "skipped dump restart marker",
+                        );
                         self.buf.drain(..skip);
                         return self.next();
                     }
+                    let skip = if let Some(b) = self.find_boundary(0) {
+                        b + 2
+                    } else {
+                        memchr::memchr(b'\n', &self.buf)
+                            .map(|p| p + 1)
+                            .unwrap_or(self.buf.len())
+                    };
                     warn!(
                         error = %e,
                         header = %header_preview,
-                        "failed to parse frame header, recovery failed",
+                        skipped_bytes = skip,
+                        "skipped invalid frame header",
                     );
-                    return Some(Err(e));
+                    self.buf.drain(..skip);
+                    return self.next();
                 }
             }
         };
@@ -876,5 +878,38 @@ mod tests {
         let data = b"this is not a SIP trace dump at all, just garbage text";
         let frames: Vec<Result<Frame, ParseError>> = FrameIterator::new(&data[..]).collect();
         assert!(frames.is_empty());
+    }
+
+    #[test]
+    fn frame_iterator_dump_marker_at_eof() {
+        // A dump restart marker at the end of input (no boundary after it)
+        // should be silently consumed, not returned as an error.
+        let mut data = Vec::new();
+        data.extend_from_slice(
+            b"recv 5 bytes from tcp/1.1.1.1:5060 at 00:00:00.000000:\nhello\x0B\n",
+        );
+        data.extend_from_slice(b"dump started at Thu Aug 22 11:38:11 2024\n");
+
+        let frames: Vec<Result<Frame, ParseError>> = FrameIterator::new(&data[..]).collect();
+        assert_eq!(frames.len(), 1);
+        assert!(frames[0].is_ok());
+        assert_eq!(frames[0].as_ref().unwrap().content, b"hello");
+    }
+
+    #[test]
+    fn frame_iterator_dump_marker_mid_stream() {
+        // A dump restart marker between two valid frames should be skipped,
+        // and both frames should parse successfully.
+        let mut data = Vec::new();
+        data.extend_from_slice(
+            b"recv 5 bytes from tcp/1.1.1.1:5060 at 00:00:00.000000:\nhello\x0B\n",
+        );
+        data.extend_from_slice(b"dump started at Thu Aug 22 11:38:11 2024\n");
+        data.extend_from_slice(b"sent 3 bytes to tcp/2.2.2.2:5060 at 00:00:01.000000:\nbye\x0B\n");
+
+        let frames: Vec<Result<Frame, ParseError>> = FrameIterator::new(&data[..]).collect();
+        assert_eq!(frames.len(), 2);
+        assert_eq!(frames[0].as_ref().unwrap().content, b"hello");
+        assert_eq!(frames[1].as_ref().unwrap().content, b"bye");
     }
 }
