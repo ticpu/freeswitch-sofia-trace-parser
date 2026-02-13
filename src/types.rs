@@ -125,6 +125,37 @@ pub struct ParsedSipMessage {
     pub frame_count: usize,
 }
 
+#[derive(Debug, Clone)]
+pub struct MimePart {
+    pub headers: Vec<(String, String)>,
+    pub body: Vec<u8>,
+}
+
+impl MimePart {
+    pub fn content_type(&self) -> Option<&str> {
+        self.headers
+            .iter()
+            .find(|(k, _)| k.eq_ignore_ascii_case("Content-Type"))
+            .map(|(_, v)| v.as_str())
+    }
+
+    fn header_value(&self, name: &str) -> Option<&str> {
+        let name_lower = name.to_ascii_lowercase();
+        self.headers
+            .iter()
+            .find(|(k, _)| k.to_ascii_lowercase() == name_lower)
+            .map(|(_, v)| v.as_str())
+    }
+
+    pub fn content_id(&self) -> Option<&str> {
+        self.header_value("Content-ID")
+    }
+
+    pub fn content_disposition(&self) -> Option<&str> {
+        self.header_value("Content-Disposition")
+    }
+}
+
 impl ParsedSipMessage {
     pub fn call_id(&self) -> Option<&str> {
         self.header_value("Call-ID")

@@ -11,9 +11,11 @@ This library provides a streaming, multi-level parser:
 
 - **Level 1 — Frames**: Split raw bytes on `\x0B\n` boundaries, parse frame headers
 - **Level 2 — Messages**: Reassemble TCP segments, split aggregated messages by Content-Length
-- **Level 3 — Parsed SIP**: Extract method/status, headers, and body
+- **Level 3 — Parsed SIP**: Extract method/status, headers, body, and multipart MIME parts
 
 ## Library Usage
+
+### Raw messages (Level 2)
 
 ```rust
 use std::fs::File;
@@ -25,6 +27,40 @@ for result in MessageIterator::new(file) {
     println!("{} {} {}:{} ({} frames, {} bytes)",
         msg.timestamp, msg.direction, msg.transport, msg.address,
         msg.frame_count, msg.content.len());
+}
+```
+
+### Parsed SIP messages (Level 3)
+
+```rust
+use std::fs::File;
+use freeswitch_sofia_trace_parser::ParsedMessageIterator;
+
+let file = File::open("profile.dump")?;
+for result in ParsedMessageIterator::new(file) {
+    let msg = result?;
+    println!("{} {} {} call-id={}",
+        msg.timestamp, msg.direction, msg.message_type,
+        msg.call_id().unwrap_or("-"));
+}
+```
+
+### Multipart body splitting (SDP + EIDO/PIDF)
+
+```rust
+use std::fs::File;
+use freeswitch_sofia_trace_parser::ParsedMessageIterator;
+
+let file = File::open("profile.dump")?;
+for result in ParsedMessageIterator::new(file) {
+    let msg = result?;
+    if let Some(parts) = msg.body_parts() {
+        for part in &parts {
+            println!("  part: {} ({} bytes)",
+                part.content_type().unwrap_or("(none)"),
+                part.body.len());
+        }
+    }
 }
 ```
 
@@ -70,6 +106,7 @@ for frame in FrameIterator::new(chain) {
 - File concatenation (`cat dump.2 dump.1 | parser`)
 - Non-UTF-8 content (works on `&[u8]`)
 - EOF without trailing `\x0B\n`
+- Multipart MIME bodies (SDP + PIDF/EIDO splitting for NG-911)
 
 ## Validated Against Production Data
 
@@ -86,6 +123,9 @@ Tested against 53 production dump files (~5.5GB) from FreeSWITCH NG-911 infrastr
 
 - Zero byte_count mismatches across all frames
 - 99.99%+ of reassembled messages start with a valid SIP request/response line
+- Level 3 SIP parsing: 99.995% success rate on TCP (24/461,527 unparseable TCP reassembly fragments)
+- Level 3 SIP parsing: 100% success rate on UDP (466,757/466,757)
+- Multipart body splitting: 1,208 multipart messages, 2,414 parts (SDP + PIDF), 0 failures
 - File concatenation (`cat dump.29 dump.28 |`): 965,515 frames, zero mismatches
 
 ## Building

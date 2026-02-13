@@ -6,7 +6,9 @@
 cargo check --message-format=short
 cargo clippy --fix --allow-dirty --message-format=short
 cargo test --lib                    # unit tests (fast, no sample files needed)
-cargo test --test level1_samples    # integration tests (requires samples/)
+cargo test --test level1_samples    # Level 1 integration tests (requires samples/)
+cargo test --test level2_samples    # Level 2 integration tests (requires samples/)
+cargo test --test level3_samples    # Level 3 integration tests (requires samples/)
 ```
 
 ## Test Architecture
@@ -21,7 +23,7 @@ Always available, no external dependencies. Cover:
 - Aggregation splitting (Content-Length based multi-message splitting)
 - SIP parsing (request/status lines, headers, body extraction)
 
-### Integration tests (`cargo test --test level1_samples`)
+### Integration tests (`cargo test --test level{1,2,3}_samples`)
 
 Require production sample files in `samples/` (gitignored, contain PII).
 Tests skip gracefully if files are missing — they check `path.exists()` and return early.
@@ -33,8 +35,13 @@ Sample files are raw binary FreeSWITCH dump files (~50-350MB each):
 - `esinet1-v6-tls.dump.{20..29}` — TLS IPv6
 - `internal-v4.dump.{20..29}` — internal TCP IPv4
 - `internal-v6.dump.{20..29}` — internal TCP IPv6
+- `esinet1-v6-tls.dump.180` — TLS IPv6 with real traffic (INVITE/NOTIFY/BYE)
+- `esinet1-v4-tls.dump.{179,180}` — TLS IPv4 (180 has real traffic)
 
 Logrotate numbering: higher number = older file.
+
+Level 3 tests tolerate a small number of parse failures (~0.004% on TCP) caused by
+TCP reassembly edge cases producing fragments without valid SIP first lines.
 
 The `file_concatenation_two_dumps` test validates `Read::chain()` across two files
 (simulating `cat dump.29 dump.28 | parser`).
@@ -42,8 +49,10 @@ The `file_concatenation_two_dumps` test validates `Read::chain()` across two fil
 ### Running integration tests
 
 ```sh
-# All integration tests (~2 min with all samples)
+# All integration tests
 cargo test --test level1_samples -- --nocapture
+cargo test --test level2_samples -- --nocapture
+cargo test --test level3_samples -- --nocapture
 
 # Single test
 cargo test --test level1_samples esinet1_v4_tcp -- --nocapture
