@@ -52,10 +52,14 @@ fn parse_sip_message(msg: &SipMessage) -> Result<ParsedSipMessage, ParseError> {
     // Find end of headers
     let header_end = CRLFCRLF.find(content);
     let (headers, body) = match header_end {
-        Some(pos) => {
+        Some(pos) if pos > first_line_end + 1 => {
             let header_bytes = &content[first_line_end + 2..pos];
             let body = &content[pos + 4..];
             (header_bytes, body)
+        }
+        Some(pos) => {
+            let body = &content[pos + 4..];
+            (&[][..], body)
         }
         None => {
             // No blank line — entire content after first line is headers, no body

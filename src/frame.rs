@@ -768,6 +768,75 @@ mod tests {
     }
 
     #[test]
+    fn frame_iterator_grep_separator_between_frames() {
+        // grep -C NNN inserts "--\n" between non-contiguous context groups.
+        // With GrepFilter applied, these are stripped and frames parse cleanly.
+        let mut data = Vec::new();
+        data.extend_from_slice(
+            b"recv 5 bytes from tcp/1.1.1.1:5060 at 00:00:00.000000:\nhello\x0B\n",
+        );
+        data.extend_from_slice(
+            b"sent 5 bytes to tcp/1.1.1.1:5060 at 00:00:00.000001:\nworld\x0B\n",
+        );
+
+        let filtered = crate::grep::GrepFilter::new(&data[..]);
+        let frames: Vec<Frame> = FrameIterator::new(filtered)
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert_eq!(frames.len(), 2);
+        assert_eq!(frames[0].content, b"hello");
+        assert_eq!(frames[1].content, b"world");
+    }
+
+    #[test]
+    fn frame_iterator_grep_partial_context() {
+        // After \x0B\n, grep inserts "--\n" then partial SIP from another context,
+        // then \x0B\n before the next valid frame.
+        let mut data = Vec::new();
+        data.extend_from_slice(
+            b"recv 5 bytes from tcp/1.1.1.1:5060 at 00:00:00.000000:\nhello\x0B\n",
+        );
+        // Grep separator followed by partial context from a different group
+        data.extend_from_slice(b"Accept: application/sdp\r\nContent-Length: 0\r\n\r\n");
+        data.extend_from_slice(b"\x0B\n");
+        data.extend_from_slice(
+            b"sent 3 bytes to tcp/2.2.2.2:5060 at 00:00:01.000000:\nbye\x0B\n",
+        );
+
+        let filtered = crate::grep::GrepFilter::new(&data[..]);
+        let frames: Vec<Frame> = FrameIterator::new(filtered)
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert_eq!(frames.len(), 2);
+        assert_eq!(frames[0].content, b"hello");
+        assert_eq!(frames[1].content, b"bye");
+    }
+
+    #[test]
+    fn frame_iterator_grep_separator_strips_from_content() {
+        // Grep separator within frame content is removed by GrepFilter,
+        // reducing content corruption.
+        let content = b"SIP/2.0 200 OK\r\nVia: a\r\nContent-Length: 0\r\n\r\n";
+        let mut data = Vec::new();
+        let header = format!(
+            "recv {} bytes from tcp/1.1.1.1:5060 at 00:00:00.000000:\n",
+            content.len()
+        );
+        data.extend_from_slice(header.as_bytes());
+        // Insert grep separator in the middle of content
+        data.extend_from_slice(b"SIP/2.0 200 OK\r\nVia: a\r\n--\nContent-Length: 0\r\n\r\n");
+        data.extend_from_slice(b"\x0B\n");
+
+        let filtered = crate::grep::GrepFilter::new(&data[..]);
+        let frames: Vec<Frame> = FrameIterator::new(filtered)
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert_eq!(frames.len(), 1);
+        // The --\n was stripped, so content is the SIP message without the separator
+        assert_eq!(frames[0].content, content);
+    }
+
+    #[test]
     fn frame_iterator_empty_input() {
         let data: &[u8] = b"";
         let frames: Vec<Result<Frame, ParseError>> = FrameIterator::new(data).collect();

@@ -9,7 +9,8 @@ use tracing::error;
 
 use freeswitch_sofia_trace_parser::types::{Direction, SipMessageType};
 use freeswitch_sofia_trace_parser::{
-    FrameIterator, MessageIterator, ParsedMessageIterator, ParsedSipMessage, SipMessage,
+    FrameIterator, GrepFilter, MessageIterator, ParsedMessageIterator, ParsedSipMessage,
+    SipMessage,
 };
 
 enum OutputMode {
@@ -263,34 +264,35 @@ fn output_mode(cli: &Cli) -> OutputMode {
 }
 
 fn open_input(files: &[String]) -> Box<dyn Read> {
-    if files.is_empty() || (files.len() == 1 && files[0] == "-") {
-        return Box::new(io::stdin().lock());
-    }
-
-    let mut readers: Vec<Box<dyn Read>> = Vec::new();
-    for path in files {
-        if path == "-" {
-            readers.push(Box::new(io::stdin().lock()));
-        } else {
-            match File::open(path) {
-                Ok(f) => readers.push(Box::new(f)),
-                Err(e) => {
-                    eprintln!("{path}: {e}");
-                    process::exit(1);
+    let raw: Box<dyn Read> = if files.is_empty() || (files.len() == 1 && files[0] == "-") {
+        Box::new(io::stdin().lock())
+    } else {
+        let mut readers: Vec<Box<dyn Read>> = Vec::new();
+        for path in files {
+            if path == "-" {
+                readers.push(Box::new(io::stdin().lock()));
+            } else {
+                match File::open(path) {
+                    Ok(f) => readers.push(Box::new(f)),
+                    Err(e) => {
+                        eprintln!("{path}: {e}");
+                        process::exit(1);
+                    }
                 }
             }
         }
-    }
 
-    if readers.len() == 1 {
-        return readers.remove(0);
-    }
-
-    let mut chain: Box<dyn Read> = readers.remove(0);
-    for r in readers {
-        chain = Box::new(chain.chain(r));
-    }
-    chain
+        if readers.len() == 1 {
+            readers.remove(0)
+        } else {
+            let mut chain: Box<dyn Read> = readers.remove(0);
+            for r in readers {
+                chain = Box::new(chain.chain(r));
+            }
+            chain
+        }
+    };
+    Box::new(GrepFilter::new(raw))
 }
 
 fn init_tracing(verbose: u8) {
