@@ -199,6 +199,63 @@ fn tls_v4_all_messages_parse() {
 }
 
 #[test]
+fn tcp_v6_all_messages_parse() {
+    let result = parse_file("esinet1-v6-tcp.dump.205");
+    if result.total == 0 {
+        return;
+    }
+    let msgs = &result.parsed;
+
+    eprintln!(
+        "esinet1-v6-tcp.dump.205: {} parsed, {} errors out of {} total",
+        msgs.len(),
+        result.errors,
+        result.total
+    );
+
+    let requests = msgs
+        .iter()
+        .filter(|m| matches!(m.message_type, SipMessageType::Request { .. }))
+        .count();
+    let responses = msgs
+        .iter()
+        .filter(|m| matches!(m.message_type, SipMessageType::Response { .. }))
+        .count();
+    eprintln!("  requests: {requests}, responses: {responses}");
+
+    assert!(requests > 0, "should have requests");
+    assert!(responses > 0, "should have responses");
+
+    let success_rate = msgs.len() as f64 / result.total as f64;
+    assert!(
+        success_rate > 0.999,
+        "parse success rate too low: {:.3}%",
+        success_rate * 100.0
+    );
+}
+
+#[test]
+fn udp_v6_all_messages_parse() {
+    let result = parse_file("esinet1-v6-udp.dump.205");
+    if result.total == 0 {
+        return;
+    }
+    let msgs = &result.parsed;
+
+    eprintln!("esinet1-v6-udp.dump.205: {} parsed messages", msgs.len());
+    assert!(msgs.iter().all(|m| m.transport == Transport::Udp));
+
+    let with_callid = msgs.iter().filter(|m| m.call_id().is_some()).count();
+    let ratio = with_callid as f64 / msgs.len() as f64;
+    eprintln!(
+        "  with Call-ID: {with_callid}/{} ({:.1}%)",
+        msgs.len(),
+        ratio * 100.0
+    );
+    assert!(ratio > 0.99);
+}
+
+#[test]
 fn messages_with_body_have_content_type() {
     let result = parse_file("esinet1-v4-tcp.dump.20");
     if result.total == 0 {

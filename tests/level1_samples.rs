@@ -217,34 +217,151 @@ fn internal_v6() {
 }
 
 #[test]
+fn esinet1_v6_tcp() {
+    let frames = parse_sample("esinet1-v6-tcp.dump.205");
+    if frames.is_empty() {
+        return;
+    }
+    assert_all_frames_valid(&frames, "esinet1-v6-tcp");
+
+    assert!(
+        frames.iter().all(|f| f.transport == Transport::Tcp),
+        "expected all TCP frames"
+    );
+
+    for frame in frames.iter().take(10) {
+        assert!(
+            frame.address.starts_with('['),
+            "expected IPv6 bracketed address: {}",
+            frame.address
+        );
+    }
+
+    let (recv, sent) = count_by_direction(&frames);
+    assert!(recv > 0, "expected recv frames");
+    assert!(sent > 0, "expected sent frames");
+
+    eprintln!(
+        "esinet1-v6-tcp.dump.205: {} frames ({} recv, {} sent)",
+        frames.len(),
+        recv,
+        sent
+    );
+
+    let mismatches = frames
+        .iter()
+        .filter(|f| f.byte_count != f.content.len())
+        .count();
+    eprintln!("  byte_count mismatches: {}/{}", mismatches, frames.len());
+}
+
+#[test]
+fn esinet1_v6_udp() {
+    let frames = parse_sample("esinet1-v6-udp.dump.205");
+    if frames.is_empty() {
+        return;
+    }
+    assert_all_frames_valid(&frames, "esinet1-v6-udp");
+
+    assert!(
+        frames.iter().all(|f| f.transport == Transport::Udp),
+        "expected all UDP frames"
+    );
+
+    for frame in frames.iter().take(10) {
+        assert!(
+            frame.address.starts_with('['),
+            "expected IPv6 bracketed address: {}",
+            frame.address
+        );
+    }
+
+    let (recv, sent) = count_by_direction(&frames);
+    eprintln!(
+        "esinet1-v6-udp.dump.205: {} frames ({} recv, {} sent)",
+        frames.len(),
+        recv,
+        sent
+    );
+
+    let mismatches = frames
+        .iter()
+        .filter(|f| f.byte_count != f.content.len())
+        .count();
+    eprintln!("  byte_count mismatches: {}/{}", mismatches, frames.len());
+}
+
+#[test]
+fn esinet1_v4_tls() {
+    let frames = parse_sample("esinet1-v4-tls.dump.193");
+    if frames.is_empty() {
+        return;
+    }
+    assert_all_frames_valid(&frames, "esinet1-v4-tls");
+
+    assert!(
+        frames.iter().all(|f| f.transport == Transport::Tls),
+        "expected all TLS frames"
+    );
+
+    let (recv, sent) = count_by_direction(&frames);
+    eprintln!(
+        "esinet1-v4-tls.dump.193: {} frames ({} recv, {} sent)",
+        frames.len(),
+        recv,
+        sent
+    );
+}
+
+#[test]
 fn all_samples_consistent_frame_counts() {
     // Parse multiple rotated files of same type, verify they all parse without error
     let prefixes = [
         "esinet1-v4-tcp.dump",
+        "esinet1-v4-tls.dump",
         "esinet1-v4-udp.dump",
+        "esinet1-v6-tcp.dump",
         "esinet1-v6-tls.dump",
+        "esinet1-v6-udp.dump",
         "internal-v4.dump",
         "internal-v6.dump",
     ];
 
+    let dir = sample_dir();
+    if !dir.exists() {
+        eprintln!("skipping: samples/ not found");
+        return;
+    }
+
     for prefix in &prefixes {
-        let mut counts = Vec::new();
-        for n in 20..=29 {
-            let name = format!("{prefix}.{n}");
-            let path = sample_dir().join(&name);
-            if !path.exists() {
-                continue;
-            }
-            let file = File::open(&path).unwrap();
-            let frame_count = FrameIterator::new(file).filter_map(Result::ok).count();
-            counts.push((n, frame_count));
-        }
-        if counts.is_empty() {
+        let mut files: Vec<String> = std::fs::read_dir(dir)
+            .unwrap()
+            .filter_map(Result::ok)
+            .filter_map(|e| {
+                let name = e.file_name().to_string_lossy().to_string();
+                if name.starts_with(prefix)
+                    && !name.ends_with(".xz")
+                    && name.len() > prefix.len() + 1
+                    && name.as_bytes()[prefix.len()] == b'.'
+                    && name[prefix.len() + 1..].bytes().all(|b| b.is_ascii_digit())
+                {
+                    Some(name)
+                } else {
+                    None
+                }
+            })
+            .collect();
+        files.sort();
+
+        if files.is_empty() {
             continue;
         }
-        eprintln!("{prefix}:");
-        for (n, count) in &counts {
-            eprintln!("  .{n}: {count} frames");
+
+        eprintln!("{prefix}: ({} files)", files.len());
+        for name in &files {
+            let file = File::open(dir.join(name)).unwrap();
+            let frame_count = FrameIterator::new(file).filter_map(Result::ok).count();
+            eprintln!("  {name}: {frame_count} frames");
         }
     }
 }

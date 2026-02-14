@@ -424,11 +424,19 @@ fn run_stats(reader: Box<dyn Read>, filters: &CompiledFilters) {
     let mut total: usize = 0;
     let mut matched: usize = 0;
     let mut errors: usize = 0;
+    let mut total_frames: usize = 0;
+    let mut multi_frame_msgs: usize = 0;
+    let mut max_frame_count: usize = 0;
 
     for result in ParsedMessageIterator::new(reader) {
         total += 1;
         match result {
             Ok(msg) => {
+                total_frames += msg.frame_count;
+                if msg.frame_count > 1 {
+                    multi_frame_msgs += 1;
+                    max_frame_count = max_frame_count.max(msg.frame_count);
+                }
                 if !filters.matches(&msg) {
                     continue;
                 }
@@ -461,6 +469,13 @@ fn run_stats(reader: Box<dyn Read>, filters: &CompiledFilters) {
     }
     if let Some(&n) = direction_counts.get(&Direction::Sent) {
         println!("sent: {n}");
+    }
+
+    println!("\nreassembly:");
+    println!("  frames: {total_frames}");
+    println!("  multi-frame messages: {multi_frame_msgs}");
+    if max_frame_count > 1 {
+        println!("  max frames per message: {max_frame_count}");
     }
 
     let mut methods: Vec<_> = method_counts.into_iter().collect();

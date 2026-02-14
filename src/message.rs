@@ -456,6 +456,62 @@ mod tests {
     }
 
     #[test]
+    fn tcp_reassembly_interleaved_different_addresses() {
+        // Two different addresses both sending multi-frame messages,
+        // frames arriving interleaved:
+        //   Frame 1: recv from A (partial INVITE)
+        //   Frame 2: recv from B (partial NOTIFY)
+        //   Frame 3: recv from A (rest of INVITE — completes A)
+        //   Frame 4: recv from B (rest of NOTIFY — completes B)
+        let a_part1 = b"INVITE sip:user@host SIP/2.0\r\n";
+        let a_part2 = b"Content-Length: 3\r\n\r\nSDP";
+        let b_part1 = b"NOTIFY sip:user@host SIP/2.0\r\n";
+        let b_part2 = b"Content-Length: 4\r\n\r\nBODY";
+
+        let mut data = make_frame(Direction::Recv, Transport::Tcp, "[::1]:5060", a_part1);
+        data.extend_from_slice(&make_frame(
+            Direction::Recv,
+            Transport::Tcp,
+            "[::2]:5060",
+            b_part1,
+        ));
+        data.extend_from_slice(&make_frame(
+            Direction::Recv,
+            Transport::Tcp,
+            "[::1]:5060",
+            a_part2,
+        ));
+        data.extend_from_slice(&make_frame(
+            Direction::Recv,
+            Transport::Tcp,
+            "[::2]:5060",
+            b_part2,
+        ));
+
+        let msgs: Vec<SipMessage> = MessageIterator::new(&data[..])
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+
+        assert_eq!(msgs.len(), 2);
+
+        // INVITE from [::1] completes first (frame 3 arrives before frame 4)
+        assert_eq!(msgs[0].address, "[::1]:5060");
+        assert_eq!(msgs[0].frame_count, 2);
+        let mut expected_a = Vec::new();
+        expected_a.extend_from_slice(a_part1);
+        expected_a.extend_from_slice(a_part2);
+        assert_eq!(msgs[0].content, expected_a);
+
+        // NOTIFY from [::2] completes second
+        assert_eq!(msgs[1].address, "[::2]:5060");
+        assert_eq!(msgs[1].frame_count, 2);
+        let mut expected_b = Vec::new();
+        expected_b.extend_from_slice(b_part1);
+        expected_b.extend_from_slice(b_part2);
+        assert_eq!(msgs[1].content, expected_b);
+    }
+
+    #[test]
     fn direction_change_splits_messages() {
         let recv_content = b"OPTIONS sip:user@host SIP/2.0\r\nContent-Length: 0\r\n\r\n";
         let sent_content = b"SIP/2.0 200 OK\r\nContent-Length: 0\r\n\r\n";
