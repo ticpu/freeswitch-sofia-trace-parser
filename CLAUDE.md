@@ -7,6 +7,8 @@ This is a **library-first** crate. `src/bin/main.rs` is a sample (but complete) 
 
 ## Build & Test Workflow
 
+**Always run `cargo fmt` before every commit.** The pre-commit hook enforces formatting.
+
 ```sh
 cargo fmt
 cargo check --message-format=short

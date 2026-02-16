@@ -5,6 +5,9 @@ use tracing::{debug, info, trace, warn};
 
 use crate::types::{Direction, Frame, ParseStats, SkipReason, Timestamp, Transport};
 
+const RECV_PREFIX: &[u8] = b"recv ";
+const SENT_PREFIX: &[u8] = b"sent ";
+
 #[derive(Debug)]
 pub enum ParseError {
     InvalidHeader(String),
@@ -166,9 +169,9 @@ pub fn parse_frame_header(
         .ok_or_else(|| ParseError::InvalidHeader("header does not end with ':'".into()))?;
 
     // Direction — both "recv " and "sent " are 5 bytes
-    let direction = if line.starts_with(b"recv ") {
+    let direction = if line.starts_with(RECV_PREFIX) {
         Direction::Recv
-    } else if line.starts_with(b"sent ") {
+    } else if line.starts_with(SENT_PREFIX) {
         Direction::Sent
     } else {
         return Err(ParseError::InvalidHeader(
@@ -243,7 +246,7 @@ pub fn is_frame_header(data: &[u8]) -> bool {
     if data.len() < 20 {
         return false;
     }
-    let starts_valid = data.starts_with(b"recv ") || data.starts_with(b"sent ");
+    let starts_valid = data.starts_with(RECV_PREFIX) || data.starts_with(SENT_PREFIX);
     if !starts_valid {
         return false;
     }
@@ -516,19 +519,19 @@ impl<R: Read> Iterator for FrameIterator<R> {
                             .map(|p| p + 1)
                             .unwrap_or(self.buf.len())
                     };
-                    let reason = if self.buf.starts_with(b"recv ") || self.buf.starts_with(b"sent ")
-                    {
-                        SkipReason::InvalidHeader
-                    } else if self.frame_count == 0 {
-                        SkipReason::PartialFirstFrame
-                    } else {
-                        let skipped = &self.buf[..skip];
-                        if self.is_replay(skipped) {
-                            SkipReason::ReplayedFrame
+                    let reason =
+                        if self.buf.starts_with(RECV_PREFIX) || self.buf.starts_with(SENT_PREFIX) {
+                            SkipReason::InvalidHeader
+                        } else if self.frame_count == 0 {
+                            SkipReason::PartialFirstFrame
                         } else {
-                            SkipReason::MidStreamSkip
-                        }
-                    };
+                            let skipped = &self.buf[..skip];
+                            if self.is_replay(skipped) {
+                                SkipReason::ReplayedFrame
+                            } else {
+                                SkipReason::MidStreamSkip
+                            }
+                        };
                     self.consume_skipped(skip, reason);
                     return Some(Err(e));
                 }
