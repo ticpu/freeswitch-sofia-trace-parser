@@ -4,6 +4,7 @@ use std::fmt;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SkipReason {
     PartialFirstFrame,
+    OversizedFrame,
     MidStreamSkip,
     ReplayedFrame,
     IncompleteFrame,
@@ -14,6 +15,7 @@ impl fmt::Display for SkipReason {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             SkipReason::PartialFirstFrame => f.write_str("partial first frame"),
+            SkipReason::OversizedFrame => f.write_str("oversized frame"),
             SkipReason::MidStreamSkip => f.write_str("mid-stream skip"),
             SkipReason::ReplayedFrame => f.write_str("replayed frame (logrotate)"),
             SkipReason::IncompleteFrame => f.write_str("incomplete frame"),

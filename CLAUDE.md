@@ -89,10 +89,10 @@ This project follows test-driven development:
 
 1. Write failing tests that reproduce the bug or specify the new behavior
 2. Confirm tests fail (`cargo test --lib`)
-3. Commit the failing tests
+3. `cargo fmt && git commit --no-verify` (red phase — clippy/tests will fail, but code must be formatted)
 4. Implement the fix/feature
 5. Confirm all tests pass
-6. Commit the implementation
+6. Commit the implementation (hooks run normally)
 
 ## Investigation Principle
 

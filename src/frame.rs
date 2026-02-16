@@ -7,6 +7,7 @@ use crate::types::{Direction, Frame, ParseStats, SkipReason, Timestamp, Transpor
 
 const RECV_PREFIX: &[u8] = b"recv ";
 const SENT_PREFIX: &[u8] = b"sent ";
+const MAX_PARTIAL_FRAME: usize = 65535;
 
 #[derive(Debug)]
 pub enum ParseError {
@@ -1236,6 +1237,68 @@ mod tests {
         assert_eq!(
             stats.unparsed_regions[0].reason,
             crate::types::SkipReason::InvalidHeader
+        );
+    }
+
+    #[test]
+    fn stats_oversized_frame_at_start() {
+        let mut data = Vec::new();
+        data.resize(MAX_PARTIAL_FRAME + 1, b'x');
+        data.extend_from_slice(b"\x0B\n");
+        data.extend_from_slice(
+            b"recv 5 bytes from tcp/1.1.1.1:5060 at 00:00:00.000000:\nhello\x0B\n",
+        );
+        let mut iter = FrameIterator::new(&data[..]);
+        let items: Vec<Result<Frame, ParseError>> = iter.by_ref().collect();
+        let frames: Vec<Frame> = items.into_iter().filter_map(Result::ok).collect();
+        assert_eq!(frames.len(), 1);
+        let stats = iter.stats();
+        assert_eq!(stats.unparsed_regions.len(), 1);
+        assert_eq!(
+            stats.unparsed_regions[0].reason,
+            crate::types::SkipReason::OversizedFrame
+        );
+    }
+
+    #[test]
+    fn stats_oversized_frame_mid_stream() {
+        let mut data = Vec::new();
+        data.extend_from_slice(
+            b"recv 5 bytes from tcp/1.1.1.1:5060 at 00:00:00.000000:\nhello\x0B\n",
+        );
+        let garbage_len = MAX_PARTIAL_FRAME + 1;
+        data.resize(data.len() + garbage_len, b'x');
+        data.extend_from_slice(b"\x0B\n");
+        data.extend_from_slice(b"sent 3 bytes to tcp/3.3.3.3:5060 at 02:00:00.000000:\nbar\x0B\n");
+        let mut iter = FrameIterator::new(&data[..]);
+        let items: Vec<Result<Frame, ParseError>> = iter.by_ref().collect();
+        let frames: Vec<Frame> = items.into_iter().filter_map(Result::ok).collect();
+        assert_eq!(frames.len(), 2);
+        let stats = iter.stats();
+        assert_eq!(stats.unparsed_regions.len(), 1);
+        assert_eq!(
+            stats.unparsed_regions[0].reason,
+            crate::types::SkipReason::OversizedFrame
+        );
+    }
+
+    #[test]
+    fn stats_partial_first_frame_within_limit() {
+        // Just under the limit — should still be PartialFirstFrame
+        let mut data = Vec::new();
+        data.resize(MAX_PARTIAL_FRAME, b'x');
+        data.extend_from_slice(b"\x0B\n");
+        data.extend_from_slice(
+            b"recv 5 bytes from tcp/1.1.1.1:5060 at 00:00:00.000000:\nhello\x0B\n",
+        );
+        let mut iter = FrameIterator::new(&data[..]);
+        let frames: Vec<Frame> = iter.by_ref().collect::<Result<Vec<_>, _>>().unwrap();
+        assert_eq!(frames.len(), 1);
+        let stats = iter.stats();
+        assert_eq!(stats.unparsed_regions.len(), 1);
+        assert_eq!(
+            stats.unparsed_regions[0].reason,
+            crate::types::SkipReason::PartialFirstFrame
         );
     }
 
