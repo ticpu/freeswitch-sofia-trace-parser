@@ -760,4 +760,130 @@ mod tests {
         let msgs = extract_complete(&mut buf, &key);
         assert!(msgs.is_empty(), "should wait for headers to complete");
     }
+
+    #[test]
+    fn tcp_body_split_across_five_frames() {
+        // Simulate REQUEST.md scenario: NOTIFY with Content-Length: 6424
+        // body split across 5 TCP frames (like NG9-1-1 abandoned call JSON)
+        let body_len: usize = 6424;
+        let body: Vec<u8> = (0..body_len).map(|i| b'A' + (i % 26) as u8).collect();
+
+        let mut headers = Vec::new();
+        headers.extend_from_slice(b"NOTIFY sip:user@host SIP/2.0\r\n");
+        headers
+            .extend_from_slice(b"Via: SIP/2.0/TCP [2001:4958:10:11::6]:45538;branch=z9hG4bK-1\r\n");
+        headers.extend_from_slice(b"Call-ID: fragmented-notify@host\r\n");
+        headers.extend_from_slice(b"CSeq: 1 NOTIFY\r\n");
+        headers.extend_from_slice(
+            b"Content-Type: application/emergencyCallData.AbandonedCall+json\r\n",
+        );
+        headers.extend_from_slice(format!("Content-Length: {body_len}\r\n").as_bytes());
+        headers.extend_from_slice(b"\r\n");
+
+        let mut full_content = headers.clone();
+        full_content.extend_from_slice(&body);
+
+        // Split into 5 frames like real TCP segments
+        let frame1_len = 1500.min(full_content.len());
+        let remaining = &full_content[frame1_len..];
+        let frame2_len = 1428.min(remaining.len());
+        let remaining = &remaining[frame2_len..];
+        let frame3_len = 1428.min(remaining.len());
+        let remaining = &remaining[frame3_len..];
+        let frame4_len = 1428.min(remaining.len());
+        let remaining = &remaining[frame4_len..];
+        let frame5_len = remaining.len();
+
+        let addr = "[2001:4958:10:11::6]:45538";
+        let mut data = make_frame(
+            Direction::Recv,
+            Transport::Tcp,
+            addr,
+            &full_content[..frame1_len],
+        );
+        let mut offset = frame1_len;
+        for len in [frame2_len, frame3_len, frame4_len, frame5_len] {
+            data.extend_from_slice(&make_frame(
+                Direction::Recv,
+                Transport::Tcp,
+                addr,
+                &full_content[offset..offset + len],
+            ));
+            offset += len;
+        }
+        assert_eq!(offset, full_content.len());
+
+        let msgs: Vec<SipMessage> = MessageIterator::new(&data[..])
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+
+        assert_eq!(
+            msgs.len(),
+            1,
+            "should produce exactly one reassembled message"
+        );
+        assert_eq!(msgs[0].frame_count, 5, "should track all 5 frames");
+        assert_eq!(
+            msgs[0].content, full_content,
+            "content should be fully reassembled"
+        );
+        assert_eq!(msgs[0].direction, Direction::Recv);
+        assert_eq!(msgs[0].address, addr);
+    }
+
+    #[test]
+    fn tcp_body_split_parsed_message() {
+        // Same scenario but verified through Level 3 (ParsedSipMessage)
+        let body_len: usize = 6424;
+        let body: Vec<u8> = (0..body_len).map(|i| b'A' + (i % 26) as u8).collect();
+
+        let mut headers = Vec::new();
+        headers.extend_from_slice(b"NOTIFY sip:user@host SIP/2.0\r\n");
+        headers.extend_from_slice(b"Call-ID: fragmented-parsed@host\r\n");
+        headers.extend_from_slice(b"CSeq: 1 NOTIFY\r\n");
+        headers.extend_from_slice(
+            b"Content-Type: application/emergencyCallData.AbandonedCall+json\r\n",
+        );
+        headers.extend_from_slice(format!("Content-Length: {body_len}\r\n").as_bytes());
+        headers.extend_from_slice(b"\r\n");
+
+        let mut full_content = headers.clone();
+        full_content.extend_from_slice(&body);
+
+        // Split into 3 frames
+        let split1 = 1500.min(full_content.len());
+        let split2 = (split1 + 3000).min(full_content.len());
+
+        let addr = "[2001:db8::1]:5060";
+        let mut data = make_frame(
+            Direction::Recv,
+            Transport::Tcp,
+            addr,
+            &full_content[..split1],
+        );
+        data.extend_from_slice(&make_frame(
+            Direction::Recv,
+            Transport::Tcp,
+            addr,
+            &full_content[split1..split2],
+        ));
+        data.extend_from_slice(&make_frame(
+            Direction::Recv,
+            Transport::Tcp,
+            addr,
+            &full_content[split2..],
+        ));
+
+        let parsed: Vec<crate::types::ParsedSipMessage> =
+            crate::sip::ParsedMessageIterator::new(&data[..])
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap();
+
+        assert_eq!(parsed.len(), 1, "should produce one parsed message");
+        assert_eq!(parsed[0].content_length(), Some(body_len));
+        assert_eq!(parsed[0].body.len(), body_len, "body should be complete");
+        assert_eq!(parsed[0].body, body, "body content should match");
+        assert_eq!(parsed[0].frame_count, 3);
+        assert_eq!(parsed[0].method(), Some("NOTIFY"));
+    }
 }

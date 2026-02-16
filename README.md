@@ -269,7 +269,9 @@ cargo build --release
 cargo test --lib
 
 # Integration tests (requires production samples in samples/)
-cargo test --test level1_samples -- --nocapture
+cargo test --test level1_samples -- --nocapture  # Frame parsing
+cargo test --test level2_samples -- --nocapture  # TCP reassembly, Content-Length splitting
+cargo test --test level3_samples -- --nocapture  # SIP parsing, multipart, method extraction
 ```
 
 See [CLAUDE.md](CLAUDE.md) for testing details.
