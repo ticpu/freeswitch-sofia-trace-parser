@@ -7,7 +7,9 @@ use crate::types::{Direction, Frame, ParseStats, SkipReason, Timestamp, Transpor
 
 const RECV_PREFIX: &[u8] = b"recv ";
 const SENT_PREFIX: &[u8] = b"sent ";
-const MAX_PARTIAL_FRAME: usize = 65535;
+/// Maximum skip size classified as a partial first frame.
+/// Based on IP max datagram size (65535) plus the `\x0B\n` boundary (2 bytes).
+const MAX_PARTIAL_FRAME: usize = 65537;
 
 #[derive(Debug)]
 pub enum ParseError {
@@ -426,7 +428,12 @@ impl<R: Read> Iterator for FrameIterator<R> {
                 match self.skip_to_first_header() {
                     Some(offset) => {
                         if offset > 0 {
-                            self.consume_skipped(offset, SkipReason::PartialFirstFrame);
+                            let reason = if offset <= MAX_PARTIAL_FRAME {
+                                SkipReason::PartialFirstFrame
+                            } else {
+                                SkipReason::OversizedFrame
+                            };
+                            self.consume_skipped(offset, reason);
                         }
                         break;
                     }
@@ -523,6 +530,8 @@ impl<R: Read> Iterator for FrameIterator<R> {
                     let reason =
                         if self.buf.starts_with(RECV_PREFIX) || self.buf.starts_with(SENT_PREFIX) {
                             SkipReason::InvalidHeader
+                        } else if skip > MAX_PARTIAL_FRAME {
+                            SkipReason::OversizedFrame
                         } else if self.frame_count == 0 {
                             SkipReason::PartialFirstFrame
                         } else {
@@ -1284,9 +1293,9 @@ mod tests {
 
     #[test]
     fn stats_partial_first_frame_within_limit() {
-        // Just under the limit — should still be PartialFirstFrame
+        // Content + \x0B\n boundary = MAX_PARTIAL_FRAME, should still be PartialFirstFrame
         let mut data = Vec::new();
-        data.resize(MAX_PARTIAL_FRAME, b'x');
+        data.resize(MAX_PARTIAL_FRAME - 2, b'x');
         data.extend_from_slice(b"\x0B\n");
         data.extend_from_slice(
             b"recv 5 bytes from tcp/1.1.1.1:5060 at 00:00:00.000000:\nhello\x0B\n",

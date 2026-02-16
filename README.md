@@ -170,7 +170,8 @@ Tested against 83 production dump files (~12GB) from FreeSWITCH NG-911 infrastru
 Every sample file is verified for byte-level parse coverage. Each unparsed region is
 classified by `SkipReason`:
 
-- `PartialFirstFrame` — truncated frame at start of file (logrotate, pipe, grep extract)
+- `PartialFirstFrame` — truncated frame at start of file (logrotate, pipe, grep extract), capped at 65535 bytes
+- `OversizedFrame` — skipped region exceeds 65535 bytes (corrupt or non-dump content)
 - `ReplayedFrame` — logrotate wrote a partial frame tail at the start of the new file
 - `MidStreamSkip` — unrecoverable bytes skipped mid-stream (e.g., TCP reassembly edge case)
 - `IncompleteFrame` — frame at EOF with fewer bytes than declared in the header
