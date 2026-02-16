@@ -1,7 +1,7 @@
 use std::io::Read;
 
 use memchr::memmem;
-use tracing::{debug, info, trace, warn};
+use tracing::{debug, trace, warn};
 
 use crate::types::{Direction, Frame, ParseStats, SkipReason, Timestamp, Transport};
 
@@ -512,7 +512,7 @@ impl<R: Read> Iterator for FrameIterator<R> {
                                 end
                             })
                             .unwrap_or(self.buf.len());
-                        info!(
+                        debug!(
                             header = %header_preview,
                             skipped_bytes = skip,
                             "skipped dump restart marker",
