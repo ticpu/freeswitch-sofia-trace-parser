@@ -1121,7 +1121,55 @@ mod tests {
         assert_eq!(stats.unparsed_regions.len(), 1);
         assert_eq!(
             stats.unparsed_regions[0].reason,
-            crate::types::SkipReason::PartialFirstFrame
+            crate::types::SkipReason::MidStreamSkip
+        );
+    }
+
+    #[test]
+    fn stats_replayed_frame() {
+        let frame1 = b"recv 5 bytes from tcp/1.1.1.1:5060 at 00:00:00.000000:\nhello\x0B\n";
+        let frame2 = b"sent 3 bytes to tcp/3.3.3.3:5060 at 02:00:00.000000:\nbar\x0B\n";
+
+        let mut data = Vec::new();
+        data.extend_from_slice(frame1);
+        // Replay: tail of frame1 re-appears (logrotate race)
+        data.extend_from_slice(&frame1[frame1.len() - 10..]);
+        data.extend_from_slice(frame2);
+
+        let mut iter = FrameIterator::new(&data[..]);
+        let items: Vec<Result<Frame, ParseError>> = iter.by_ref().collect();
+        let frames: Vec<Frame> = items.into_iter().filter_map(Result::ok).collect();
+        assert_eq!(frames.len(), 2);
+        let stats = iter.stats();
+        assert_eq!(stats.unparsed_regions.len(), 1);
+        assert_eq!(
+            stats.unparsed_regions[0].reason,
+            crate::types::SkipReason::ReplayedFrame
+        );
+    }
+
+    #[test]
+    fn stats_incomplete_frame_at_eof() {
+        // Frame header says 100 bytes but only 20 bytes available before EOF
+        let mut data = Vec::new();
+        data.extend_from_slice(
+            b"recv 5 bytes from tcp/1.1.1.1:5060 at 00:00:00.000000:\nhello\x0B\n",
+        );
+        data.extend_from_slice(b"recv 100 bytes from tcp/2.2.2.2:5060 at 01:00:00.000000:\n");
+        data.extend_from_slice(b"partial content only");
+        // No \x0B\n boundary — EOF truncation
+
+        let mut iter = FrameIterator::new(&data[..]);
+        let items: Vec<Result<Frame, ParseError>> = iter.by_ref().collect();
+        let frames: Vec<Frame> = items.into_iter().filter_map(Result::ok).collect();
+        assert_eq!(frames.len(), 2, "truncated frame should still be returned");
+        assert_eq!(frames[1].content, b"partial content only");
+        assert_eq!(frames[1].byte_count, 100);
+        let stats = iter.stats();
+        assert_eq!(stats.unparsed_regions.len(), 1);
+        assert_eq!(
+            stats.unparsed_regions[0].reason,
+            crate::types::SkipReason::IncompleteFrame
         );
     }
 
