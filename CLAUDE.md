@@ -29,10 +29,13 @@ cargo test --release
 cargo build --release
 ```
 
-Tag with a signed annotated tag:
+Tag with a signed annotated tag. Include a brief changelog in the tag message:
 
 ```sh
-git tag -as v0.X.0 -m "v0.X.0"
+git tag -as v0.X.0 -m "v0.X.0
+
+- Brief changelog entry
+- Another change"
 git push --tags
 ```
 
