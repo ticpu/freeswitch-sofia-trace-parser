@@ -1,7 +1,7 @@
 use std::io::Read;
 
 use memchr::memmem;
-use tracing::{debug, trace, warn};
+use tracing::{debug, info, trace, warn};
 
 use crate::types::{Direction, Frame, ParseStats, SkipReason, Timestamp, Transport};
 
@@ -396,7 +396,7 @@ impl<R: Read> FrameIterator<R> {
                 let abs_pos = search_from + pos;
                 let after = abs_pos + 2;
                 if after < self.buf.len() && is_frame_header(&self.buf[after..]) {
-                    warn!(skipped_bytes = after, "skipped partial first frame");
+                    info!(skipped_bytes = after, "skipped partial first frame");
                     return Some(after);
                 }
                 search_from = abs_pos + 2;
