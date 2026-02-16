@@ -1406,4 +1406,31 @@ mod tests {
             Some("2025-12-14T05:35:03.269Z".to_string())
         );
     }
+
+    #[test]
+    fn whitespace_only_returns_transport_noise() {
+        use crate::frame::ParseError;
+
+        for content in [b"\n".as_slice(), b"\r\n", b"\n\n\n", b" \t\r\n"] {
+            let msg = SipMessage {
+                direction: Direction::Recv,
+                transport: Transport::Tls,
+                address: "[10.0.0.1]:5061".into(),
+                timestamp: Timestamp::TimeOnly {
+                    hour: 0,
+                    min: 0,
+                    sec: 0,
+                    usec: 0,
+                },
+                content: content.to_vec(),
+                frame_count: 1,
+            };
+            let err = msg.parse().unwrap_err();
+            assert!(
+                matches!(err, ParseError::TransportNoise { .. }),
+                "whitespace-only content {:?} should produce TransportNoise, got: {err}",
+                content,
+            );
+        }
+    }
 }

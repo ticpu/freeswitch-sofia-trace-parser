@@ -907,4 +907,65 @@ mod tests {
         assert_eq!(parsed[0].frame_count, 3);
         assert_eq!(parsed[0].method(), Some("NOTIFY"));
     }
+
+    #[test]
+    fn tls_keepalive_single_lf_drained() {
+        let data = make_frame(Direction::Recv, Transport::Tls, "[10.0.0.1]:5061", b"\n");
+        let msgs: Vec<SipMessage> = MessageIterator::new(&data[..])
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert_eq!(msgs.len(), 0, "keep-alive \\n should produce no messages");
+    }
+
+    #[test]
+    fn tls_keepalive_multiple_lf_drained() {
+        let addr = "[10.0.0.1]:5061";
+        let mut data = make_frame(Direction::Recv, Transport::Tls, addr, b"\n");
+        data.extend_from_slice(&make_frame(Direction::Recv, Transport::Tls, addr, b"\n"));
+        data.extend_from_slice(&make_frame(Direction::Recv, Transport::Tls, addr, b"\n"));
+        let msgs: Vec<SipMessage> = MessageIterator::new(&data[..])
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert_eq!(
+            msgs.len(),
+            0,
+            "multiple keep-alive \\n should produce no messages"
+        );
+    }
+
+    #[test]
+    fn tls_keepalive_interleaved_with_sip() {
+        let addr = "[10.0.0.1]:5061";
+        let sip = b"OPTIONS sip:host SIP/2.0\r\nContent-Length: 0\r\n\r\n";
+        let mut data = make_frame(Direction::Recv, Transport::Tls, addr, b"\n");
+        data.extend_from_slice(&make_frame(Direction::Recv, Transport::Tls, addr, sip));
+        data.extend_from_slice(&make_frame(Direction::Recv, Transport::Tls, addr, b"\n"));
+        let msgs: Vec<SipMessage> = MessageIterator::new(&data[..])
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert_eq!(msgs.len(), 1, "only the SIP message should be emitted");
+        assert_eq!(msgs[0].content, sip);
+    }
+
+    #[test]
+    fn tls_bare_lf_before_sip_start() {
+        let addr = "[10.0.0.1]:5061";
+        let sip_part1 = b"\nOPTIONS sip:host SIP/2.0\r\n";
+        let sip_part2 = b"Content-Length: 0\r\n\r\n";
+        let mut data = make_frame(Direction::Recv, Transport::Tls, addr, sip_part1);
+        data.extend_from_slice(&make_frame(
+            Direction::Recv,
+            Transport::Tls,
+            addr,
+            sip_part2,
+        ));
+        let msgs: Vec<SipMessage> = MessageIterator::new(&data[..])
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert_eq!(msgs.len(), 1, "SIP after bare LF should be extracted");
+        assert!(
+            msgs[0].content.starts_with(b"OPTIONS"),
+            "message should start with SIP method, not \\n"
+        );
+    }
 }

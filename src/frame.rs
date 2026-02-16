@@ -9,6 +9,11 @@ use crate::types::{Direction, Frame, ParseStats, SkipReason, Timestamp, Transpor
 pub enum ParseError {
     InvalidHeader(String),
     InvalidMessage(String),
+    TransportNoise {
+        bytes: usize,
+        transport: Transport,
+        address: String,
+    },
     Io(std::io::Error),
 }
 
@@ -17,6 +22,14 @@ impl fmt::Display for ParseError {
         match self {
             ParseError::InvalidHeader(msg) => write!(f, "invalid frame header: {msg}"),
             ParseError::InvalidMessage(msg) => write!(f, "invalid SIP message: {msg}"),
+            ParseError::TransportNoise {
+                bytes,
+                transport,
+                address,
+            } => write!(
+                f,
+                "transport noise: {bytes} bytes of non-SIP data from {transport}/{address}"
+            ),
             ParseError::Io(e) => write!(f, "I/O error: {e}"),
         }
     }
