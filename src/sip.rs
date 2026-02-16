@@ -5,7 +5,7 @@ use memchr::memmem;
 
 use crate::frame::ParseError;
 use crate::message::MessageIterator;
-use crate::types::{MimePart, ParsedSipMessage, SipMessage, SipMessageType};
+use crate::types::{MimePart, ParseStats, ParsedSipMessage, SipMessage, SipMessageType};
 
 static CRLF: LazyLock<memmem::Finder<'static>> = LazyLock::new(|| memmem::Finder::new(b"\r\n"));
 static CRLFCRLF: LazyLock<memmem::Finder<'static>> =
@@ -26,6 +26,15 @@ impl<R: std::io::Read> ParsedMessageIterator<R> {
         ParsedMessageIterator {
             inner: MessageIterator::new(reader),
         }
+    }
+
+    pub fn capture_skipped(mut self, enable: bool) -> Self {
+        self.inner = self.inner.capture_skipped(enable);
+        self
+    }
+
+    pub fn parse_stats(&self) -> &ParseStats {
+        self.inner.parse_stats()
     }
 }
 
@@ -474,6 +483,26 @@ mod tests {
             content: content.to_vec(),
             frame_count: 1,
         }
+    }
+
+    #[test]
+    fn parse_stats_delegates() {
+        let content =
+            b"OPTIONS sip:host SIP/2.0\r\nCall-ID: stats-test\r\nContent-Length: 0\r\n\r\n";
+        let header = format!(
+            "recv {} bytes from udp/10.0.0.1:5060 at 00:00:00.000000:\n",
+            content.len()
+        );
+        let mut data = header.into_bytes();
+        data.extend_from_slice(content);
+        data.extend_from_slice(b"\x0B\n");
+
+        let mut iter = ParsedMessageIterator::new(&data[..]);
+        let parsed: Vec<_> = iter.by_ref().collect::<Result<Vec<_>, _>>().unwrap();
+        assert_eq!(parsed.len(), 1);
+        let stats = iter.parse_stats();
+        assert_eq!(stats.bytes_read, data.len() as u64);
+        assert_eq!(stats.bytes_skipped, 0);
     }
 
     #[test]

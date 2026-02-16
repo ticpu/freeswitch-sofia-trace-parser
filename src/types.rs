@@ -1,6 +1,36 @@
 use std::borrow::Cow;
 use std::fmt;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SkipReason {
+    PartialFirstFrame,
+    InvalidHeader,
+}
+
+impl fmt::Display for SkipReason {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            SkipReason::PartialFirstFrame => f.write_str("partial first frame"),
+            SkipReason::InvalidHeader => f.write_str("invalid header"),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct UnparsedRegion {
+    pub offset: u64,
+    pub length: u64,
+    pub reason: SkipReason,
+    pub data: Option<Vec<u8>>,
+}
+
+#[derive(Debug, Default, Clone)]
+pub struct ParseStats {
+    pub bytes_read: u64,
+    pub bytes_skipped: u64,
+    pub unparsed_regions: Vec<UnparsedRegion>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Direction {
     Recv,

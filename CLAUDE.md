@@ -1,5 +1,10 @@
 # FreeSWITCH Sofia Trace Parser — Developer Guide
 
+## Project Type
+
+This is a **library-first** crate. `src/bin/main.rs` is a sample (but complete) CLI implementation.
+`Cargo.lock` is gitignored per Cargo convention for libraries.
+
 ## Build & Test Workflow
 
 ```sh

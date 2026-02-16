@@ -3,7 +3,7 @@ use std::io::Read;
 use memchr::memmem;
 use tracing::{debug, info, trace, warn};
 
-use crate::types::{Direction, Frame, Timestamp, Transport};
+use crate::types::{Direction, Frame, ParseStats, SkipReason, Timestamp, Transport};
 
 #[derive(Debug)]
 pub enum ParseError {
@@ -258,6 +258,9 @@ pub struct FrameIterator<R> {
     buf: Vec<u8>,
     eof: bool,
     frame_count: u64,
+    offset: u64,
+    stats: ParseStats,
+    capture_skipped: bool,
 }
 
 impl<R: Read> FrameIterator<R> {
@@ -267,7 +270,42 @@ impl<R: Read> FrameIterator<R> {
             buf: Vec::with_capacity(READ_BUF_SIZE * 2),
             eof: false,
             frame_count: 0,
+            offset: 0,
+            stats: ParseStats::default(),
+            capture_skipped: false,
         }
+    }
+
+    pub fn capture_skipped(mut self, enable: bool) -> Self {
+        self.capture_skipped = enable;
+        self
+    }
+
+    pub fn stats(&self) -> &ParseStats {
+        &self.stats
+    }
+
+    fn consume(&mut self, n: usize) {
+        self.buf.drain(..n);
+        self.offset += n as u64;
+    }
+
+    fn consume_skipped(&mut self, n: usize, reason: SkipReason) {
+        let data = if self.capture_skipped {
+            Some(self.buf[..n].to_vec())
+        } else {
+            None
+        };
+        self.stats
+            .unparsed_regions
+            .push(crate::types::UnparsedRegion {
+                offset: self.offset,
+                length: n as u64,
+                reason,
+                data,
+            });
+        self.stats.bytes_skipped += n as u64;
+        self.consume(n);
     }
 
     fn fill_buf(&mut self) -> Result<bool, std::io::Error> {
@@ -282,6 +320,7 @@ impl<R: Read> FrameIterator<R> {
             self.eof = true;
             return Ok(false);
         }
+        self.stats.bytes_read += n as u64;
         Ok(true)
     }
 
@@ -358,7 +397,7 @@ impl<R: Read> Iterator for FrameIterator<R> {
                 match self.skip_to_first_header() {
                     Some(offset) => {
                         if offset > 0 {
-                            self.buf.drain(..offset);
+                            self.consume_skipped(offset, SkipReason::PartialFirstFrame);
                         }
                         break;
                     }
@@ -394,7 +433,7 @@ impl<R: Read> Iterator for FrameIterator<R> {
             }
         }
         if strip > 0 {
-            self.buf.drain(..strip);
+            self.consume(strip);
             if self.buf.is_empty() {
                 return self.next();
             }
@@ -442,7 +481,7 @@ impl<R: Read> Iterator for FrameIterator<R> {
                             skipped_bytes = skip,
                             "skipped dump restart marker",
                         );
-                        self.buf.drain(..skip);
+                        self.consume(skip);
                         return self.next();
                     }
                     let skip = if let Some(b) = self.find_boundary(0) {
@@ -452,7 +491,7 @@ impl<R: Read> Iterator for FrameIterator<R> {
                             .map(|p| p + 1)
                             .unwrap_or(self.buf.len())
                     };
-                    self.buf.drain(..skip);
+                    self.consume_skipped(skip, SkipReason::InvalidHeader);
                     return Some(Err(e));
                 }
             }
@@ -486,7 +525,7 @@ impl<R: Read> Iterator for FrameIterator<R> {
                     } else {
                         expected_end + 1
                     };
-                    self.buf.drain(..drain_to);
+                    self.consume(drain_to);
                     self.frame_count += 1;
                     return Some(Ok(Frame {
                         direction,
@@ -502,7 +541,7 @@ impl<R: Read> Iterator for FrameIterator<R> {
             // Fall back to scanning for \x0B\n + valid header
             if let Some(boundary_pos) = self.find_boundary(content_start) {
                 let content = self.buf[content_start..boundary_pos].to_vec();
-                self.buf.drain(..boundary_pos + 2);
+                self.consume(boundary_pos + 2);
                 self.frame_count += 1;
 
                 if content.len() != byte_count {
@@ -532,7 +571,8 @@ impl<R: Read> Iterator for FrameIterator<R> {
                     self.buf.len()
                 };
                 let content = self.buf[content_start..end].to_vec();
-                self.buf.clear();
+                let len = self.buf.len();
+                self.consume(len);
                 self.frame_count += 1;
 
                 if content.len() != byte_count {
@@ -970,6 +1010,133 @@ mod tests {
         assert_eq!(frames.len(), 2);
         assert_eq!(frames[0].content, b"hello");
         assert_eq!(frames[1].content, b"world");
+    }
+
+    #[test]
+    fn stats_clean_input() {
+        let data = b"recv 5 bytes from tcp/1.1.1.1:5060 at 00:00:00.000000:\nhello\x0B\n";
+        let mut iter = FrameIterator::new(&data[..]);
+        let frames: Vec<Frame> = iter.by_ref().collect::<Result<Vec<_>, _>>().unwrap();
+        assert_eq!(frames.len(), 1);
+        let stats = iter.stats();
+        assert_eq!(stats.bytes_read, data.len() as u64);
+        assert_eq!(stats.bytes_skipped, 0);
+        assert!(stats.unparsed_regions.is_empty());
+    }
+
+    #[test]
+    fn stats_multiple_frames() {
+        let data = b"recv 5 bytes from tcp/1.1.1.1:5060 at 00:00:00.000000:\nhello\x0B\nsent 5 bytes to tcp/1.1.1.1:5060 at 00:00:00.000001:\nworld\x0B\n";
+        let mut iter = FrameIterator::new(&data[..]);
+        let frames: Vec<Frame> = iter.by_ref().collect::<Result<Vec<_>, _>>().unwrap();
+        assert_eq!(frames.len(), 2);
+        let stats = iter.stats();
+        assert_eq!(stats.bytes_read, data.len() as u64);
+        assert_eq!(stats.bytes_skipped, 0);
+        assert!(stats.unparsed_regions.is_empty());
+    }
+
+    #[test]
+    fn stats_partial_first_frame() {
+        let mut data = Vec::new();
+        data.extend_from_slice(b"partial garbage data");
+        data.extend_from_slice(b"\x0B\n");
+        data.extend_from_slice(
+            b"recv 5 bytes from tcp/1.1.1.1:5060 at 00:00:00.000000:\nhello\x0B\n",
+        );
+        let mut iter = FrameIterator::new(&data[..]);
+        let frames: Vec<Frame> = iter.by_ref().collect::<Result<Vec<_>, _>>().unwrap();
+        assert_eq!(frames.len(), 1);
+        let stats = iter.stats();
+        assert_eq!(stats.bytes_read, data.len() as u64);
+        // "partial garbage data" + "\x0B\n" = 21 bytes skipped
+        let skipped = b"partial garbage data\x0B\n".len() as u64;
+        assert_eq!(stats.bytes_skipped, skipped);
+        assert_eq!(stats.unparsed_regions.len(), 1);
+        assert_eq!(stats.unparsed_regions[0].offset, 0);
+        assert_eq!(stats.unparsed_regions[0].length, skipped);
+        assert_eq!(
+            stats.unparsed_regions[0].reason,
+            crate::types::SkipReason::PartialFirstFrame
+        );
+        assert!(stats.unparsed_regions[0].data.is_none());
+    }
+
+    #[test]
+    fn stats_partial_first_frame_capture() {
+        let mut data = Vec::new();
+        data.extend_from_slice(b"partial garbage data");
+        data.extend_from_slice(b"\x0B\n");
+        data.extend_from_slice(
+            b"recv 5 bytes from tcp/1.1.1.1:5060 at 00:00:00.000000:\nhello\x0B\n",
+        );
+        let mut iter = FrameIterator::new(&data[..]).capture_skipped(true);
+        let frames: Vec<Frame> = iter.by_ref().collect::<Result<Vec<_>, _>>().unwrap();
+        assert_eq!(frames.len(), 1);
+        let stats = iter.stats();
+        assert_eq!(stats.unparsed_regions.len(), 1);
+        let region = &stats.unparsed_regions[0];
+        assert_eq!(
+            region.data.as_deref(),
+            Some(b"partial garbage data\x0B\n".as_slice())
+        );
+    }
+
+    #[test]
+    fn stats_invalid_header_skip() {
+        let mut data = Vec::new();
+        data.extend_from_slice(
+            b"recv 5 bytes from tcp/1.1.1.1:5060 at 00:00:00.000000:\nhello\x0B\n",
+        );
+        // Invalid header between valid frames — triggers recovery
+        data.extend_from_slice(b"Content-Type: application/sdp\r\n\r\nv=0\r\n");
+        data.extend_from_slice(b"\x0B\n");
+        data.extend_from_slice(b"sent 3 bytes to tcp/3.3.3.3:5060 at 02:00:00.000000:\nbar\x0B\n");
+
+        let mut iter = FrameIterator::new(&data[..]);
+        let items: Vec<Result<Frame, ParseError>> = iter.by_ref().collect();
+        let frames: Vec<Frame> = items.into_iter().filter_map(Result::ok).collect();
+        assert_eq!(frames.len(), 2);
+        let stats = iter.stats();
+        assert!(stats.bytes_skipped > 0);
+        assert_eq!(stats.unparsed_regions.len(), 1);
+        assert_eq!(
+            stats.unparsed_regions[0].reason,
+            crate::types::SkipReason::InvalidHeader
+        );
+    }
+
+    #[test]
+    fn stats_dump_restart_marker() {
+        let mut data = Vec::new();
+        data.extend_from_slice(
+            b"recv 5 bytes from tcp/1.1.1.1:5060 at 00:00:00.000000:\nhello\x0B\n",
+        );
+        data.extend_from_slice(b"dump started at Thu Aug 22 11:38:11 2024\n\n\n");
+        data.extend_from_slice(b"sent 3 bytes to tcp/2.2.2.2:5060 at 00:00:01.000000:\nbye\x0B\n");
+
+        let mut iter = FrameIterator::new(&data[..]);
+        let frames: Vec<Frame> = iter.by_ref().collect::<Result<Vec<_>, _>>().unwrap();
+        assert_eq!(frames.len(), 2);
+        let stats = iter.stats();
+        // Dump restart marker is structural, not skipped
+        assert_eq!(stats.bytes_skipped, 0);
+        assert!(stats.unparsed_regions.is_empty());
+    }
+
+    #[test]
+    fn stats_no_capture_by_default() {
+        let mut data = Vec::new();
+        data.extend_from_slice(b"partial garbage data");
+        data.extend_from_slice(b"\x0B\n");
+        data.extend_from_slice(
+            b"recv 5 bytes from tcp/1.1.1.1:5060 at 00:00:00.000000:\nhello\x0B\n",
+        );
+        let mut iter = FrameIterator::new(&data[..]);
+        let _: Vec<_> = iter.by_ref().collect::<Result<Vec<_>, _>>().unwrap();
+        let stats = iter.stats();
+        assert_eq!(stats.unparsed_regions.len(), 1);
+        assert!(stats.unparsed_regions[0].data.is_none());
     }
 
     #[test]

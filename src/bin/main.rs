@@ -9,7 +9,8 @@ use tracing::info;
 
 use freeswitch_sofia_trace_parser::types::{Direction, SipMessageType};
 use freeswitch_sofia_trace_parser::{
-    FrameIterator, GrepFilter, MessageIterator, ParsedMessageIterator, ParsedSipMessage, SipMessage,
+    FrameIterator, GrepFilter, MessageIterator, ParseStats, ParsedMessageIterator,
+    ParsedSipMessage, SipMessage,
 };
 
 enum OutputMode {
@@ -91,6 +92,10 @@ struct Cli {
     /// Show statistics summary
     #[arg(long, group = "output_mode")]
     stats: bool,
+
+    /// Report unparsed input regions to stderr
+    #[arg(long)]
+    unparsed: bool,
 
     /// Increase verbosity (-v info, -vv debug, -vvv trace)
     #[arg(short, long, action = clap::ArgAction::Count)]
@@ -376,8 +381,9 @@ fn output_message(mode: &OutputMode, msg: &ParsedSipMessage) {
     }
 }
 
-fn run_frames(reader: Box<dyn Read>) {
-    for result in FrameIterator::new(reader) {
+fn run_frames(reader: Box<dyn Read>, capture_skipped: bool) -> ParseStats {
+    let mut iter = FrameIterator::new(reader).capture_skipped(capture_skipped);
+    for result in &mut iter {
         match result {
             Ok(frame) => {
                 println!(
@@ -394,10 +400,12 @@ fn run_frames(reader: Box<dyn Read>) {
             Err(e) => info!("frame error: {e}"),
         }
     }
+    iter.stats().clone()
 }
 
-fn run_raw(reader: Box<dyn Read>) {
-    for result in MessageIterator::new(reader) {
+fn run_raw(reader: Box<dyn Read>, capture_skipped: bool) -> ParseStats {
+    let mut iter = MessageIterator::new(reader).capture_skipped(capture_skipped);
+    for result in &mut iter {
         match result {
             Ok(msg) => {
                 println!(
@@ -415,9 +423,14 @@ fn run_raw(reader: Box<dyn Read>) {
             Err(e) => info!("message error: {e}"),
         }
     }
+    iter.parse_stats().clone()
 }
 
-fn run_stats(reader: Box<dyn Read>, filters: &CompiledFilters) {
+fn run_stats(
+    reader: Box<dyn Read>,
+    filters: &CompiledFilters,
+    capture_skipped: bool,
+) -> ParseStats {
     let mut method_counts: HashMap<String, usize> = HashMap::new();
     let mut status_counts: HashMap<u16, usize> = HashMap::new();
     let mut direction_counts: HashMap<Direction, usize> = HashMap::new();
@@ -428,7 +441,8 @@ fn run_stats(reader: Box<dyn Read>, filters: &CompiledFilters) {
     let mut multi_frame_msgs: usize = 0;
     let mut max_frame_count: usize = 0;
 
-    for result in ParsedMessageIterator::new(reader) {
+    let mut iter = ParsedMessageIterator::new(reader).capture_skipped(capture_skipped);
+    for result in &mut iter {
         total += 1;
         match result {
             Ok(msg) => {
@@ -457,6 +471,7 @@ fn run_stats(reader: Box<dyn Read>, filters: &CompiledFilters) {
             Err(_) => errors += 1,
         }
     }
+    let stats = iter.parse_stats().clone();
 
     println!("total: {total}");
     println!("matched: {matched}");
@@ -478,6 +493,25 @@ fn run_stats(reader: Box<dyn Read>, filters: &CompiledFilters) {
         println!("  max frames per message: {max_frame_count}");
     }
 
+    if stats.bytes_read > 0 {
+        let parsed_pct = if stats.bytes_read > 0 {
+            ((stats.bytes_read - stats.bytes_skipped) as f64 / stats.bytes_read as f64) * 100.0
+        } else {
+            100.0
+        };
+        println!("\ninput:");
+        println!("  bytes: {}", stats.bytes_read);
+        println!(
+            "  parsed: {:.3}% ({}/{})",
+            parsed_pct,
+            stats.bytes_read - stats.bytes_skipped,
+            stats.bytes_read
+        );
+        if stats.bytes_skipped > 0 {
+            println!("  skipped: {} bytes", stats.bytes_skipped);
+        }
+    }
+
     let mut methods: Vec<_> = method_counts.into_iter().collect();
     methods.sort_by(|a, b| b.1.cmp(&a.1));
     if !methods.is_empty() {
@@ -495,10 +529,18 @@ fn run_stats(reader: Box<dyn Read>, filters: &CompiledFilters) {
             println!("  {code}: {count}");
         }
     }
+
+    stats
 }
 
-fn run_filtered(reader: Box<dyn Read>, mode: &OutputMode, filters: &CompiledFilters) {
-    for result in ParsedMessageIterator::new(reader) {
+fn run_filtered(
+    reader: Box<dyn Read>,
+    mode: &OutputMode,
+    filters: &CompiledFilters,
+    capture_skipped: bool,
+) -> ParseStats {
+    let mut iter = ParsedMessageIterator::new(reader).capture_skipped(capture_skipped);
+    for result in &mut iter {
         match result {
             Ok(msg) => {
                 if !filters.matches(&msg) {
@@ -509,6 +551,7 @@ fn run_filtered(reader: Box<dyn Read>, mode: &OutputMode, filters: &CompiledFilt
             Err(e) => info!("parse error: {e}"),
         }
     }
+    iter.parse_stats().clone()
 }
 
 struct DialogState {
@@ -518,11 +561,17 @@ struct DialogState {
     saw_bye_response: bool,
 }
 
-fn run_dialog(reader: Box<dyn Read>, mode: &OutputMode, filters: &CompiledFilters) {
+fn run_dialog(
+    reader: Box<dyn Read>,
+    mode: &OutputMode,
+    filters: &CompiledFilters,
+    capture_skipped: bool,
+) -> ParseStats {
     let mut dialogs: HashMap<String, DialogState> = HashMap::new();
 
+    let mut iter = MessageIterator::new(reader).capture_skipped(capture_skipped);
     // Single pass: collect messages by Call-ID, track matches
-    for result in MessageIterator::new(reader) {
+    for result in &mut iter {
         let sip_msg = match result {
             Ok(m) => m,
             Err(e) => {
@@ -603,6 +652,23 @@ fn run_dialog(reader: Box<dyn Read>, mode: &OutputMode, filters: &CompiledFilter
             Err(e) => info!("parse error on output: {e}"),
         }
     }
+
+    iter.parse_stats().clone()
+}
+
+fn print_unparsed(stats: &ParseStats) {
+    for region in &stats.unparsed_regions {
+        eprintln!(
+            "{}-{} ({} bytes): {}",
+            region.offset,
+            region.offset + region.length - 1,
+            region.length,
+            region.reason
+        );
+        if let Some(data) = &region.data {
+            eprintln!("{}", freeswitch_sofia_trace_parser::fmt::encode_qp(data));
+        }
+    }
 }
 
 fn main() {
@@ -619,30 +685,26 @@ fn main() {
         process::exit(2);
     }
 
-    if cli.frames {
-        run_frames(open_input(&cli.files));
-        return;
+    let capture = cli.unparsed;
+
+    let stats = if cli.frames {
+        run_frames(open_input(&cli.files), capture)
+    } else if cli.raw {
+        run_raw(open_input(&cli.files), capture)
+    } else {
+        let filters = compile_filters(&cli);
+        let mode = output_mode(&cli);
+
+        if cli.dialog {
+            run_dialog(open_input(&cli.files), &mode, &filters, capture)
+        } else if cli.stats {
+            run_stats(open_input(&cli.files), &filters, capture)
+        } else {
+            run_filtered(open_input(&cli.files), &mode, &filters, capture)
+        }
+    };
+
+    if cli.unparsed {
+        print_unparsed(&stats);
     }
-
-    if cli.raw {
-        run_raw(open_input(&cli.files));
-        return;
-    }
-
-    let filters = compile_filters(&cli);
-    let mode = output_mode(&cli);
-
-    if cli.dialog {
-        run_dialog(open_input(&cli.files), &mode, &filters);
-        return;
-    }
-
-    let reader = open_input(&cli.files);
-
-    if cli.stats {
-        run_stats(reader, &filters);
-        return;
-    }
-
-    run_filtered(reader, &mode, &filters);
 }

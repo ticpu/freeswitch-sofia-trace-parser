@@ -5,7 +5,7 @@ use memchr::memmem;
 use tracing::{debug, trace, warn};
 
 use crate::frame::{FrameIterator, ParseError};
-use crate::types::{Direction, SipMessage, Timestamp, Transport};
+use crate::types::{Direction, ParseStats, SipMessage, Timestamp, Transport};
 
 static CRLF: LazyLock<memmem::Finder<'static>> = LazyLock::new(|| memmem::Finder::new(b"\r\n"));
 static CRLFCRLF: LazyLock<memmem::Finder<'static>> =
@@ -33,6 +33,15 @@ impl<R: std::io::Read> MessageIterator<R> {
             ready: VecDeque::new(),
             exhausted: false,
         }
+    }
+
+    pub fn capture_skipped(mut self, enable: bool) -> Self {
+        self.frames = self.frames.capture_skipped(enable);
+        self
+    }
+
+    pub fn parse_stats(&self) -> &ParseStats {
+        self.frames.stats()
     }
 
     fn flush_all(&mut self) {
@@ -829,6 +838,18 @@ mod tests {
         );
         assert_eq!(msgs[0].direction, Direction::Recv);
         assert_eq!(msgs[0].address, addr);
+    }
+
+    #[test]
+    fn parse_stats_delegates() {
+        let content = b"OPTIONS sip:user@host SIP/2.0\r\nContent-Length: 0\r\n\r\n";
+        let data = make_frame(Direction::Recv, Transport::Udp, "1.1.1.1:5060", content);
+        let mut iter = MessageIterator::new(&data[..]);
+        let msgs: Vec<_> = iter.by_ref().collect::<Result<Vec<_>, _>>().unwrap();
+        assert_eq!(msgs.len(), 1);
+        let stats = iter.parse_stats();
+        assert_eq!(stats.bytes_read, data.len() as u64);
+        assert_eq!(stats.bytes_skipped, 0);
     }
 
     #[test]

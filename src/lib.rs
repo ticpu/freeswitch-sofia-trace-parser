@@ -1,3 +1,4 @@
+pub mod fmt;
 pub mod frame;
 pub mod grep;
 pub mod message;
