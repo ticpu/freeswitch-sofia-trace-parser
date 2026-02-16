@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::sync::LazyLock;
 
 use memchr::memmem;
@@ -257,6 +258,27 @@ impl ParsedSipMessage {
         let boundary = self.multipart_boundary()?;
         Some(parse_multipart_body(&self.body, boundary))
     }
+
+    pub fn body_text(&self) -> Cow<'_, str> {
+        if let Some(ct) = self.content_type() {
+            if is_json_content_type(ct) {
+                return Cow::Owned(unescape_json_body(&self.body));
+            }
+        }
+        self.body_data()
+    }
+
+    pub fn json_field(&self, _key: &str) -> Option<String> {
+        None
+    }
+}
+
+fn is_json_content_type(_ct: &str) -> bool {
+    false
+}
+
+fn unescape_json_body(input: &[u8]) -> String {
+    String::from_utf8_lossy(input).into_owned()
 }
 
 fn extract_boundary(content_type: &str) -> Option<&str> {
@@ -1071,5 +1093,212 @@ mod tests {
         assert!(parts[0].content_type().is_none());
         assert!(parts[0].headers.is_empty());
         assert_eq!(parts[0].body, raw_body);
+    }
+
+    // --- is_json_content_type tests ---
+
+    #[test]
+    fn is_json_content_type_application_json() {
+        assert!(is_json_content_type("application/json"));
+    }
+
+    #[test]
+    fn is_json_content_type_plus_json() {
+        assert!(is_json_content_type(
+            "application/emergencyCallData.AbandonedCall+json"
+        ));
+    }
+
+    #[test]
+    fn is_json_content_type_with_params() {
+        assert!(is_json_content_type("application/json; charset=utf-8"));
+    }
+
+    #[test]
+    fn is_json_content_type_case_insensitive() {
+        assert!(is_json_content_type("Application/JSON"));
+    }
+
+    #[test]
+    fn is_json_content_type_not_text_plain() {
+        assert!(!is_json_content_type("text/plain"));
+    }
+
+    #[test]
+    fn is_json_content_type_not_multipart() {
+        assert!(!is_json_content_type("multipart/mixed;boundary=foo"));
+    }
+
+    #[test]
+    fn is_json_content_type_not_sdp() {
+        assert!(!is_json_content_type("application/sdp"));
+    }
+
+    // --- unescape_json_body tests ---
+
+    #[test]
+    fn unescape_json_basic_escapes() {
+        let input = br#"{"key":"line1\r\nline2\ttab\"\\"}"#;
+        let result = unescape_json_body(input);
+        assert!(
+            result.contains("line1\r\nline2\ttab\"\\"),
+            "basic escapes not unescaped: {result:?}"
+        );
+    }
+
+    #[test]
+    fn unescape_json_slash_and_control() {
+        let input = br#"{"a":"\/path","b":"\b\f"}"#;
+        let result = unescape_json_body(input);
+        assert!(result.contains("/path"), "\\/ should become /");
+        assert!(result.contains('\x08'), "\\b should become backspace");
+        assert!(result.contains('\x0C'), "\\f should become form feed");
+    }
+
+    #[test]
+    fn unescape_json_unicode_basic() {
+        // \u0041 = 'A'
+        let input = br#"{"x":"\u0041"}"#;
+        let result = unescape_json_body(input);
+        assert!(
+            result.contains('A'),
+            "\\u0041 should become 'A': {result:?}"
+        );
+    }
+
+    #[test]
+    fn unescape_json_unicode_surrogate_pair() {
+        // U+1F600 (grinning face) = \uD83D\uDE00
+        let input = br#"{"emoji":"\uD83D\uDE00"}"#;
+        let result = unescape_json_body(input);
+        assert!(
+            result.contains('\u{1F600}'),
+            "surrogate pair should produce U+1F600: {result:?}"
+        );
+    }
+
+    #[test]
+    fn unescape_json_passthrough_non_escape() {
+        let input = b"no escapes here";
+        let result = unescape_json_body(input);
+        assert_eq!(result, "no escapes here");
+    }
+
+    // --- json_field tests ---
+
+    #[test]
+    fn json_field_extract_string() {
+        let body = br#"{"event":"AbandonedCall","id":"123"}"#;
+        let mut content = Vec::new();
+        content.extend_from_slice(b"NOTIFY sip:host SIP/2.0\r\n");
+        content.extend_from_slice(b"Call-ID: jf-test@host\r\n");
+        content.extend_from_slice(b"Content-Type: application/json\r\n");
+        content.extend_from_slice(format!("Content-Length: {}\r\n", body.len()).as_bytes());
+        content.extend_from_slice(b"\r\n");
+        content.extend_from_slice(body);
+
+        let msg = make_sip_message(&content);
+        let parsed = msg.parse().unwrap();
+
+        assert_eq!(
+            parsed.json_field("event"),
+            Some("AbandonedCall".to_string())
+        );
+        assert_eq!(parsed.json_field("id"), Some("123".to_string()));
+    }
+
+    #[test]
+    fn json_field_missing_key() {
+        let body = br#"{"event":"AbandonedCall"}"#;
+        let mut content = Vec::new();
+        content.extend_from_slice(b"NOTIFY sip:host SIP/2.0\r\n");
+        content.extend_from_slice(b"Call-ID: jf-miss@host\r\n");
+        content.extend_from_slice(b"Content-Type: application/json\r\n");
+        content.extend_from_slice(format!("Content-Length: {}\r\n", body.len()).as_bytes());
+        content.extend_from_slice(b"\r\n");
+        content.extend_from_slice(body);
+
+        let msg = make_sip_message(&content);
+        let parsed = msg.parse().unwrap();
+
+        assert_eq!(parsed.json_field("nonexistent"), None);
+    }
+
+    #[test]
+    fn json_field_non_string_value() {
+        let body = br#"{"count":42,"active":true}"#;
+        let mut content = Vec::new();
+        content.extend_from_slice(b"NOTIFY sip:host SIP/2.0\r\n");
+        content.extend_from_slice(b"Call-ID: jf-nonstr@host\r\n");
+        content.extend_from_slice(b"Content-Type: application/json\r\n");
+        content.extend_from_slice(format!("Content-Length: {}\r\n", body.len()).as_bytes());
+        content.extend_from_slice(b"\r\n");
+        content.extend_from_slice(body);
+
+        let msg = make_sip_message(&content);
+        let parsed = msg.parse().unwrap();
+
+        assert_eq!(parsed.json_field("count"), None);
+        assert_eq!(parsed.json_field("active"), None);
+    }
+
+    #[test]
+    fn json_field_non_json_content_type() {
+        let body = br#"{"event":"AbandonedCall"}"#;
+        let mut content = Vec::new();
+        content.extend_from_slice(b"NOTIFY sip:host SIP/2.0\r\n");
+        content.extend_from_slice(b"Call-ID: jf-nonjson@host\r\n");
+        content.extend_from_slice(b"Content-Type: text/plain\r\n");
+        content.extend_from_slice(format!("Content-Length: {}\r\n", body.len()).as_bytes());
+        content.extend_from_slice(b"\r\n");
+        content.extend_from_slice(body);
+
+        let msg = make_sip_message(&content);
+        let parsed = msg.parse().unwrap();
+
+        assert_eq!(parsed.json_field("event"), None);
+    }
+
+    #[test]
+    fn json_field_unescapes_value() {
+        let body = br#"{"invite":"INVITE sip:host\r\nTo: <sip:host>\r\n"}"#;
+        let mut content = Vec::new();
+        content.extend_from_slice(b"NOTIFY sip:host SIP/2.0\r\n");
+        content.extend_from_slice(b"Call-ID: jf-unescape@host\r\n");
+        content.extend_from_slice(b"Content-Type: application/json\r\n");
+        content.extend_from_slice(format!("Content-Length: {}\r\n", body.len()).as_bytes());
+        content.extend_from_slice(b"\r\n");
+        content.extend_from_slice(body);
+
+        let msg = make_sip_message(&content);
+        let parsed = msg.parse().unwrap();
+
+        let invite = parsed.json_field("invite").unwrap();
+        assert!(
+            invite.contains("INVITE sip:host\r\nTo: <sip:host>\r\n"),
+            "json_field should return unescaped string: {invite:?}"
+        );
+    }
+
+    #[test]
+    fn json_field_plus_json_content_type() {
+        let body = br#"{"cancelTimestamp":"2025-12-14T05:35:03.269Z"}"#;
+        let mut content = Vec::new();
+        content.extend_from_slice(b"NOTIFY sip:host SIP/2.0\r\n");
+        content.extend_from_slice(b"Call-ID: jf-plus@host\r\n");
+        content.extend_from_slice(
+            b"Content-Type: application/emergencyCallData.AbandonedCall+json\r\n",
+        );
+        content.extend_from_slice(format!("Content-Length: {}\r\n", body.len()).as_bytes());
+        content.extend_from_slice(b"\r\n");
+        content.extend_from_slice(body);
+
+        let msg = make_sip_message(&content);
+        let parsed = msg.parse().unwrap();
+
+        assert_eq!(
+            parsed.json_field("cancelTimestamp"),
+            Some("2025-12-14T05:35:03.269Z".to_string())
+        );
     }
 }

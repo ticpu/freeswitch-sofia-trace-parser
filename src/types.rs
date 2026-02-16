@@ -227,7 +227,7 @@ impl ParsedSipMessage {
         }
     }
 
-    pub fn body_text(&self) -> Cow<'_, str> {
+    pub fn body_data(&self) -> Cow<'_, str> {
         String::from_utf8_lossy(&self.body)
     }
 
@@ -337,7 +337,7 @@ mod tests {
     }
 
     #[test]
-    fn body_text_valid_utf8() {
+    fn body_data_valid_utf8() {
         let msg = make_parsed(
             SipMessageType::Request {
                 method: "MESSAGE".into(),
@@ -346,11 +346,11 @@ mod tests {
             vec![],
             b"hello world",
         );
-        assert_eq!(&*msg.body_text(), "hello world");
+        assert_eq!(&*msg.body_data(), "hello world");
     }
 
     #[test]
-    fn body_text_empty() {
+    fn body_data_empty() {
         let msg = make_parsed(
             SipMessageType::Request {
                 method: "OPTIONS".into(),
@@ -359,11 +359,11 @@ mod tests {
             vec![],
             b"",
         );
-        assert_eq!(&*msg.body_text(), "");
+        assert_eq!(&*msg.body_data(), "");
     }
 
     #[test]
-    fn body_text_binary() {
+    fn body_data_binary() {
         let msg = make_parsed(
             SipMessageType::Request {
                 method: "MESSAGE".into(),
@@ -372,6 +372,74 @@ mod tests {
             vec![],
             &[0xFF, 0xFE],
         );
-        assert!(msg.body_text().contains('\u{FFFD}'));
+        assert!(msg.body_data().contains('\u{FFFD}'));
+    }
+
+    #[test]
+    fn body_text_non_json_passthrough() {
+        let msg = make_parsed(
+            SipMessageType::Request {
+                method: "INVITE".into(),
+                uri: "sip:host".into(),
+            },
+            vec![("Content-Type", "application/sdp")],
+            b"v=0\r\ns=-\r\n",
+        );
+        assert_eq!(msg.body_text().as_ref(), msg.body_data().as_ref());
+    }
+
+    #[test]
+    fn body_text_json_unescapes_newlines() {
+        let msg = make_parsed(
+            SipMessageType::Request {
+                method: "NOTIFY".into(),
+                uri: "sip:host".into(),
+            },
+            vec![("Content-Type", "application/json")],
+            br#"{"invite":"INVITE sip:host SIP/2.0\r\nTo: <sip:host>\r\n"}"#,
+        );
+        let text = msg.body_text();
+        assert!(
+            text.contains("INVITE sip:host SIP/2.0\r\nTo: <sip:host>\r\n"),
+            "JSON \\r\\n should be unescaped to actual CRLF, got: {text:?}"
+        );
+    }
+
+    #[test]
+    fn body_text_plus_json_content_type() {
+        let msg = make_parsed(
+            SipMessageType::Request {
+                method: "NOTIFY".into(),
+                uri: "sip:host".into(),
+            },
+            vec![(
+                "Content-Type",
+                "application/emergencyCallData.AbandonedCall+json",
+            )],
+            br#"{"invite":"line1\nline2"}"#,
+        );
+        let text = msg.body_text();
+        assert!(
+            text.contains("line1\nline2"),
+            "application/*+json should trigger unescaping, got: {text:?}"
+        );
+    }
+
+    #[test]
+    fn body_data_preserves_json_escapes() {
+        let raw = br#"{"key":"value\nwith\\escapes"}"#;
+        let msg = make_parsed(
+            SipMessageType::Request {
+                method: "NOTIFY".into(),
+                uri: "sip:host".into(),
+            },
+            vec![("Content-Type", "application/json")],
+            raw,
+        );
+        assert_eq!(
+            msg.body_data().as_ref(),
+            r#"{"key":"value\nwith\\escapes"}"#,
+            "body_data() must preserve raw escapes"
+        );
     }
 }
