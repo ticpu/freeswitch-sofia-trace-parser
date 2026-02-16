@@ -64,6 +64,37 @@ for result in ParsedMessageIterator::new(file) {
 }
 ```
 
+### Content-type-aware body access
+
+`ParsedSipMessage` provides three methods for body access:
+
+- `body_data()` — raw bytes as UTF-8 (no processing, exact wire representation)
+- `body_text()` — for JSON content types, unescapes RFC 8259 string escape sequences (`\r\n` → CRLF, `\t` → tab, `\"` → `"`, `\uXXXX` → Unicode including surrogate pairs); passthrough for all other content types
+- `json_field(key)` — parses body as JSON, returns unescaped string value for a top-level key; returns `None` if content type is not JSON, body is invalid, key is missing, or value is not a string
+
+JSON-aware behavior activates for `application/json` and any `application/*+json` subtype (e.g., `application/emergencyCallData.AbandonedCall+json`). Matching is case-insensitive; media type parameters like `charset=utf-8` are ignored.
+
+```rust
+use std::fs::File;
+use freeswitch_sofia_trace_parser::ParsedMessageIterator;
+
+let file = File::open("profile.dump")?;
+for result in ParsedMessageIterator::new(file) {
+    let msg = result?;
+
+    // Extract embedded INVITE from NG9-1-1 AbandonedCall JSON NOTIFY
+    if let Some(invite) = msg.json_field("invite") {
+        println!("{}", invite); // actual CRLF, not literal \r\n
+    }
+
+    // body_text() unescapes JSON — greppable with regex
+    let text = msg.body_text();
+    if text.contains("urn:service:sos") {
+        println!("Emergency call: {}", msg.call_id().unwrap_or("-"));
+    }
+}
+```
+
 ### Streaming from pipes
 
 ```rust
@@ -107,6 +138,7 @@ for frame in FrameIterator::new(chain) {
 - Non-UTF-8 content (works on `&[u8]`)
 - EOF without trailing `\x0B\n`
 - Multipart MIME bodies (SDP + PIDF/EIDO splitting for NG-911)
+- JSON body unescaping for `application/json` and `application/*+json` content types
 
 ## Validated Against Production Data
 
