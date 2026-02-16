@@ -268,17 +268,93 @@ impl ParsedSipMessage {
         self.body_data()
     }
 
-    pub fn json_field(&self, _key: &str) -> Option<String> {
-        None
+    pub fn json_field(&self, key: &str) -> Option<String> {
+        let ct = self.content_type()?;
+        if !is_json_content_type(ct) {
+            return None;
+        }
+        let value: serde_json::Value = serde_json::from_slice(&self.body).ok()?;
+        let obj = value.as_object()?;
+        obj.get(key)?.as_str().map(|s| s.to_string())
     }
 }
 
-fn is_json_content_type(_ct: &str) -> bool {
-    false
+fn is_json_content_type(ct: &str) -> bool {
+    let media_type = ct.split(';').next().unwrap_or("").trim();
+    let lower = media_type.to_ascii_lowercase();
+    lower == "application/json" || (lower.starts_with("application/") && lower.ends_with("+json"))
 }
 
 fn unescape_json_body(input: &[u8]) -> String {
-    String::from_utf8_lossy(input).into_owned()
+    let s = String::from_utf8_lossy(input);
+    let mut out = String::with_capacity(s.len());
+    let mut chars = s.chars();
+
+    while let Some(c) = chars.next() {
+        if c != '\\' {
+            out.push(c);
+            continue;
+        }
+        match chars.next() {
+            Some('"') => out.push('"'),
+            Some('\\') => out.push('\\'),
+            Some('/') => out.push('/'),
+            Some('b') => out.push('\x08'),
+            Some('f') => out.push('\x0C'),
+            Some('n') => out.push('\n'),
+            Some('r') => out.push('\r'),
+            Some('t') => out.push('\t'),
+            Some('u') => unescape_unicode(&mut chars, &mut out),
+            Some(other) => {
+                out.push('\\');
+                out.push(other);
+            }
+            None => out.push('\\'),
+        }
+    }
+    out
+}
+
+fn unescape_unicode(chars: &mut std::str::Chars<'_>, out: &mut String) {
+    let hex: String = chars.by_ref().take(4).collect();
+    let Some(code_point) = parse_hex4(&hex) else {
+        out.push_str("\\u");
+        out.push_str(&hex);
+        return;
+    };
+
+    if (0xD800..=0xDBFF).contains(&code_point) {
+        let mut peek = chars.clone();
+        if peek.next() == Some('\\') && peek.next() == Some('u') {
+            let hex2: String = peek.by_ref().take(4).collect();
+            if let Some(low) = parse_hex4(&hex2) {
+                if (0xDC00..=0xDFFF).contains(&low) {
+                    let combined =
+                        0x10000 + ((code_point as u32 - 0xD800) << 10) + (low as u32 - 0xDC00);
+                    if let Some(ch) = char::from_u32(combined) {
+                        out.push(ch);
+                        *chars = peek;
+                        return;
+                    }
+                }
+            }
+        }
+        out.push_str("\\u");
+        out.push_str(&hex);
+    } else if let Some(ch) = char::from_u32(code_point as u32) {
+        out.push(ch);
+    } else {
+        out.push_str("\\u");
+        out.push_str(&hex);
+    }
+}
+
+fn parse_hex4(hex: &str) -> Option<u16> {
+    if hex.len() == 4 {
+        u16::from_str_radix(hex, 16).ok()
+    } else {
+        None
+    }
 }
 
 fn extract_boundary(content_type: &str) -> Option<&str> {
