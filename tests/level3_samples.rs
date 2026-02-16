@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::fs::File;
 use std::path::Path;
 
-use freeswitch_sofia_trace_parser::types::{SipMessageType, Transport};
+use freeswitch_sofia_trace_parser::types::{ParseStats, SipMessageType, SkipReason, Transport};
 use freeswitch_sofia_trace_parser::{ParsedMessageIterator, ParsedSipMessage};
 
 fn sample_dir() -> &'static Path {
@@ -13,6 +13,7 @@ struct ParseResult {
     parsed: Vec<freeswitch_sofia_trace_parser::ParsedSipMessage>,
     errors: usize,
     total: usize,
+    stats: ParseStats,
 }
 
 fn parse_file(name: &str) -> ParseResult {
@@ -23,13 +24,15 @@ fn parse_file(name: &str) -> ParseResult {
             parsed: vec![],
             errors: 0,
             total: 0,
+            stats: ParseStats::default(),
         };
     }
     let file = File::open(&path).unwrap();
+    let mut iter = ParsedMessageIterator::new(file);
     let mut parsed = Vec::new();
     let mut errors = 0;
     let mut total = 0;
-    for result in ParsedMessageIterator::new(file) {
+    for result in iter.by_ref() {
         total += 1;
         match result {
             Ok(msg) => parsed.push(msg),
@@ -42,11 +45,42 @@ fn parse_file(name: &str) -> ParseResult {
             errors as f64 / total as f64 * 100.0
         );
     }
+    let stats = iter.parse_stats().clone();
     ParseResult {
         parsed,
         errors,
         total,
+        stats,
     }
+}
+
+fn assert_parse_stats(stats: &ParseStats, name: &str, max_partial: usize) {
+    let partial_count = stats
+        .unparsed_regions
+        .iter()
+        .filter(|r| r.reason == SkipReason::PartialFirstFrame)
+        .count();
+    let invalid_count = stats
+        .unparsed_regions
+        .iter()
+        .filter(|r| r.reason == SkipReason::InvalidHeader)
+        .count();
+
+    eprintln!(
+        "{name}: bytes_read={}, bytes_skipped={}, regions={} (partial={partial_count}, invalid={invalid_count})",
+        stats.bytes_read,
+        stats.bytes_skipped,
+        stats.unparsed_regions.len(),
+    );
+
+    assert!(
+        partial_count <= max_partial,
+        "{name}: expected at most {max_partial} partial first frame(s), got {partial_count}"
+    );
+    assert_eq!(
+        invalid_count, 0,
+        "{name}: expected zero invalid header skips, got {invalid_count}"
+    );
 }
 
 #[test]
@@ -55,6 +89,7 @@ fn tcp_all_messages_parse() {
     if result.total == 0 {
         return;
     }
+    assert_parse_stats(&result.stats, "esinet1-v4-tcp.dump.20", 1);
     let msgs = &result.parsed;
 
     eprintln!(
@@ -131,6 +166,7 @@ fn udp_all_messages_parse() {
     if result.total == 0 {
         return;
     }
+    assert_parse_stats(&result.stats, "esinet1-v4-udp.dump.20", 1);
     let msgs = &result.parsed;
 
     eprintln!("esinet1-v4-udp.dump.20: {} parsed messages", msgs.len());
@@ -153,6 +189,7 @@ fn tls_v6_all_messages_parse() {
     if result.total == 0 {
         return;
     }
+    assert_parse_stats(&result.stats, "esinet1-v6-tls.dump.180", 1);
     let msgs = &result.parsed;
 
     eprintln!("esinet1-v6-tls.dump.180: {} parsed messages", msgs.len());
@@ -189,6 +226,7 @@ fn tls_v4_all_messages_parse() {
     if result.total == 0 {
         return;
     }
+    assert_parse_stats(&result.stats, "esinet1-v4-tls.dump.180", 1);
     let msgs = &result.parsed;
 
     eprintln!("esinet1-v4-tls.dump.180: {} parsed messages", msgs.len());
@@ -204,6 +242,7 @@ fn tcp_v6_all_messages_parse() {
     if result.total == 0 {
         return;
     }
+    assert_parse_stats(&result.stats, "esinet1-v6-tcp.dump.205", 1);
     let msgs = &result.parsed;
 
     eprintln!(
@@ -240,6 +279,7 @@ fn udp_v6_all_messages_parse() {
     if result.total == 0 {
         return;
     }
+    assert_parse_stats(&result.stats, "esinet1-v6-udp.dump.205", 1);
     let msgs = &result.parsed;
 
     eprintln!("esinet1-v6-udp.dump.205: {} parsed messages", msgs.len());

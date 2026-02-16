@@ -2,21 +2,61 @@ use std::collections::HashMap;
 use std::fs::File;
 use std::path::Path;
 
-use freeswitch_sofia_trace_parser::types::Transport;
+use freeswitch_sofia_trace_parser::types::{ParseStats, SkipReason, Transport};
 use freeswitch_sofia_trace_parser::MessageIterator;
 
 fn sample_dir() -> &'static Path {
     Path::new("samples")
 }
 
-fn parse_messages(name: &str) -> Vec<freeswitch_sofia_trace_parser::SipMessage> {
+struct MessageParseResult {
+    messages: Vec<freeswitch_sofia_trace_parser::SipMessage>,
+    stats: ParseStats,
+}
+
+fn parse_messages(name: &str) -> MessageParseResult {
     let path = sample_dir().join(name);
     if !path.exists() {
         eprintln!("skipping {name}: file not found");
-        return vec![];
+        return MessageParseResult {
+            messages: vec![],
+            stats: ParseStats::default(),
+        };
     }
     let file = File::open(&path).unwrap();
-    MessageIterator::new(file).filter_map(Result::ok).collect()
+    let mut iter = MessageIterator::new(file);
+    let messages: Vec<_> = iter.by_ref().filter_map(Result::ok).collect();
+    let stats = iter.parse_stats().clone();
+    MessageParseResult { messages, stats }
+}
+
+fn assert_parse_stats(stats: &ParseStats, name: &str, max_partial: usize) {
+    let partial_count = stats
+        .unparsed_regions
+        .iter()
+        .filter(|r| r.reason == SkipReason::PartialFirstFrame)
+        .count();
+    let invalid_count = stats
+        .unparsed_regions
+        .iter()
+        .filter(|r| r.reason == SkipReason::InvalidHeader)
+        .count();
+
+    eprintln!(
+        "{name}: bytes_read={}, bytes_skipped={}, regions={} (partial={partial_count}, invalid={invalid_count})",
+        stats.bytes_read,
+        stats.bytes_skipped,
+        stats.unparsed_regions.len(),
+    );
+
+    assert!(
+        partial_count <= max_partial,
+        "{name}: expected at most {max_partial} partial first frame(s), got {partial_count}"
+    );
+    assert_eq!(
+        invalid_count, 0,
+        "{name}: expected zero invalid header skips, got {invalid_count}"
+    );
 }
 
 #[test]
@@ -31,9 +71,8 @@ fn tcp_reassembly_produces_fewer_messages_than_frames() {
         .filter_map(Result::ok)
         .count();
 
-    let msg_count = MessageIterator::new(File::open(&path).unwrap())
-        .filter_map(Result::ok)
-        .count();
+    let mut iter = MessageIterator::new(File::open(&path).unwrap());
+    let msg_count = iter.by_ref().filter_map(Result::ok).count();
 
     eprintln!("esinet1-v4-tcp.dump.20: {frame_count} frames → {msg_count} messages");
     assert!(
@@ -41,6 +80,7 @@ fn tcp_reassembly_produces_fewer_messages_than_frames() {
         "TCP reassembly should produce fewer messages than frames"
     );
     assert!(msg_count > 0, "should produce at least one message");
+    assert_parse_stats(iter.parse_stats(), "esinet1-v4-tcp.dump.20", 1);
 }
 
 #[test]
@@ -55,23 +95,25 @@ fn udp_messages_equal_frames() {
         .filter_map(Result::ok)
         .count();
 
-    let msg_count = MessageIterator::new(File::open(&path).unwrap())
-        .filter_map(Result::ok)
-        .count();
+    let mut iter = MessageIterator::new(File::open(&path).unwrap());
+    let msg_count = iter.by_ref().filter_map(Result::ok).count();
 
     eprintln!("esinet1-v4-udp.dump.20: {frame_count} frames → {msg_count} messages");
     assert_eq!(
         msg_count, frame_count,
         "UDP messages should equal frames (no reassembly)"
     );
+    assert_parse_stats(iter.parse_stats(), "esinet1-v4-udp.dump.20", 1);
 }
 
 #[test]
 fn tcp_multiframe_messages_have_correct_frame_count() {
-    let msgs = parse_messages("esinet1-v4-tcp.dump.20");
+    let result = parse_messages("esinet1-v4-tcp.dump.20");
+    let msgs = &result.messages;
     if msgs.is_empty() {
         return;
     }
+    assert_parse_stats(&result.stats, "esinet1-v4-tcp.dump.20", 1);
 
     let multi_frame: Vec<_> = msgs.iter().filter(|m| m.frame_count > 1).collect();
     let max_frames = multi_frame.iter().map(|m| m.frame_count).max().unwrap_or(0);
@@ -86,7 +128,7 @@ fn tcp_multiframe_messages_have_correct_frame_count() {
     assert!(!multi_frame.is_empty(), "expected multi-frame TCP messages");
 
     // All messages should have non-empty content
-    for msg in &msgs {
+    for msg in msgs {
         assert!(!msg.content.is_empty(), "message has empty content");
     }
 }
@@ -104,9 +146,8 @@ fn tls_v6_with_real_traffic() {
         .filter_map(Result::ok)
         .count();
 
-    let msgs: Vec<_> = MessageIterator::new(File::open(&path).unwrap())
-        .filter_map(Result::ok)
-        .collect();
+    let mut iter = MessageIterator::new(File::open(&path).unwrap());
+    let msgs: Vec<_> = iter.by_ref().filter_map(Result::ok).collect();
 
     let msg_count = msgs.len();
     let multi: Vec<_> = msgs.iter().filter(|m| m.frame_count > 1).collect();
@@ -122,6 +163,7 @@ fn tls_v6_with_real_traffic() {
     assert!(msgs.iter().all(|m| m.transport == Transport::Tls));
     assert!(msgs.iter().all(|m| m.address.starts_with('[')));
     assert!(msg_count > 0, "should produce at least one message");
+    assert_parse_stats(iter.parse_stats(), "esinet1-v6-tls.dump.180", 1);
 }
 
 #[test]
@@ -137,9 +179,8 @@ fn tls_v4_with_real_traffic() {
         .filter_map(Result::ok)
         .count();
 
-    let msgs: Vec<_> = MessageIterator::new(File::open(&path).unwrap())
-        .filter_map(Result::ok)
-        .collect();
+    let mut iter = MessageIterator::new(File::open(&path).unwrap());
+    let msgs: Vec<_> = iter.by_ref().filter_map(Result::ok).collect();
 
     let msg_count = msgs.len();
     let multi = msgs.iter().filter(|m| m.frame_count > 1).count();
@@ -147,6 +188,7 @@ fn tls_v4_with_real_traffic() {
     eprintln!("esinet1-v4-tls.dump.180: {frame_count} frames → {msg_count} messages ({multi} multi-frame)");
 
     assert!(msgs.iter().all(|m| m.transport == Transport::Tls));
+    assert_parse_stats(iter.parse_stats(), "esinet1-v4-tls.dump.180", 1);
 }
 
 #[test]
@@ -161,9 +203,8 @@ fn tcp_v6_messages() {
         .filter_map(Result::ok)
         .count();
 
-    let msg_count = MessageIterator::new(File::open(&path).unwrap())
-        .filter_map(Result::ok)
-        .count();
+    let mut iter = MessageIterator::new(File::open(&path).unwrap());
+    let msg_count = iter.by_ref().filter_map(Result::ok).count();
 
     eprintln!("esinet1-v6-tcp.dump.205: {frame_count} frames → {msg_count} messages");
     assert!(msg_count > 0, "should produce at least one message");
@@ -171,6 +212,7 @@ fn tcp_v6_messages() {
         msg_count <= frame_count,
         "message count should not exceed frame count"
     );
+    assert_parse_stats(iter.parse_stats(), "esinet1-v6-tcp.dump.205", 1);
 }
 
 #[test]
@@ -185,20 +227,21 @@ fn udp_v6_messages_equal_frames() {
         .filter_map(Result::ok)
         .count();
 
-    let msg_count = MessageIterator::new(File::open(&path).unwrap())
-        .filter_map(Result::ok)
-        .count();
+    let mut iter = MessageIterator::new(File::open(&path).unwrap());
+    let msg_count = iter.by_ref().filter_map(Result::ok).count();
 
     eprintln!("esinet1-v6-udp.dump.205: {frame_count} frames → {msg_count} messages");
     assert_eq!(
         msg_count, frame_count,
         "UDP messages should equal frames (no reassembly)"
     );
+    assert_parse_stats(iter.parse_stats(), "esinet1-v6-udp.dump.205", 1);
 }
 
 #[test]
 fn tcp_interleaved_reassembly() {
-    let msgs = parse_messages("esinet1-v4-tcp.dump.20");
+    let result = parse_messages("esinet1-v4-tcp.dump.20");
+    let msgs = &result.messages;
     if msgs.is_empty() {
         return;
     }
@@ -243,7 +286,8 @@ fn tcp_interleaved_reassembly() {
 
 #[test]
 fn message_content_starts_with_sip() {
-    let msgs = parse_messages("esinet1-v4-tcp.dump.20");
+    let result = parse_messages("esinet1-v4-tcp.dump.20");
+    let msgs = &result.messages;
     if msgs.is_empty() {
         return;
     }

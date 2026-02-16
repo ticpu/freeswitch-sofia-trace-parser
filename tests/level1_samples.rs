@@ -2,22 +2,32 @@ use std::collections::HashMap;
 use std::fs::File;
 use std::path::Path;
 
-use freeswitch_sofia_trace_parser::types::{Direction, Transport};
+use freeswitch_sofia_trace_parser::types::{Direction, ParseStats, SkipReason, Transport};
 use freeswitch_sofia_trace_parser::FrameIterator;
 
 fn sample_dir() -> &'static Path {
     Path::new("samples")
 }
 
-fn parse_sample(name: &str) -> Vec<freeswitch_sofia_trace_parser::Frame> {
+struct FrameParseResult {
+    frames: Vec<freeswitch_sofia_trace_parser::Frame>,
+    stats: ParseStats,
+}
+
+fn parse_sample(name: &str) -> FrameParseResult {
     let path = sample_dir().join(name);
     if !path.exists() {
         eprintln!("skipping {name}: file not found");
-        return vec![];
+        return FrameParseResult {
+            frames: vec![],
+            stats: ParseStats::default(),
+        };
     }
     let file = File::open(&path).unwrap();
+    let mut iter = FrameIterator::new(file);
     let mut errors = 0usize;
-    let frames: Vec<_> = FrameIterator::new(file)
+    let frames: Vec<_> = iter
+        .by_ref()
         .filter_map(|r| match r {
             Ok(f) => Some(f),
             Err(_) => {
@@ -29,7 +39,37 @@ fn parse_sample(name: &str) -> Vec<freeswitch_sofia_trace_parser::Frame> {
     if errors > 0 {
         eprintln!("{name}: {errors} recovery errors skipped");
     }
-    frames
+    let stats = iter.stats().clone();
+    FrameParseResult { frames, stats }
+}
+
+fn assert_parse_stats(stats: &ParseStats, name: &str, max_partial: usize) {
+    let partial_count = stats
+        .unparsed_regions
+        .iter()
+        .filter(|r| r.reason == SkipReason::PartialFirstFrame)
+        .count();
+    let invalid_count = stats
+        .unparsed_regions
+        .iter()
+        .filter(|r| r.reason == SkipReason::InvalidHeader)
+        .count();
+
+    eprintln!(
+        "{name}: bytes_read={}, bytes_skipped={}, regions={} (partial={partial_count}, invalid={invalid_count})",
+        stats.bytes_read,
+        stats.bytes_skipped,
+        stats.unparsed_regions.len(),
+    );
+
+    assert!(
+        partial_count <= max_partial,
+        "{name}: expected at most {max_partial} partial first frame(s), got {partial_count}"
+    );
+    assert_eq!(
+        invalid_count, 0,
+        "{name}: expected zero invalid header skips, got {invalid_count}"
+    );
 }
 
 fn assert_all_frames_valid(frames: &[freeswitch_sofia_trace_parser::Frame], name: &str) {
@@ -60,11 +100,13 @@ fn count_by_direction(frames: &[freeswitch_sofia_trace_parser::Frame]) -> (usize
 
 #[test]
 fn esinet1_v4_tcp() {
-    let frames = parse_sample("esinet1-v4-tcp.dump.20");
+    let result = parse_sample("esinet1-v4-tcp.dump.20");
+    let frames = &result.frames;
     if frames.is_empty() {
         return;
     }
-    assert_all_frames_valid(&frames, "esinet1-v4-tcp");
+    assert_all_frames_valid(frames, "esinet1-v4-tcp");
+    assert_parse_stats(&result.stats, "esinet1-v4-tcp.dump.20", 1);
 
     // All frames should be TCP
     assert!(
@@ -73,7 +115,7 @@ fn esinet1_v4_tcp() {
     );
 
     // Should have both recv and sent
-    let (recv, sent) = count_by_direction(&frames);
+    let (recv, sent) = count_by_direction(frames);
     assert!(recv > 0, "expected recv frames");
     assert!(sent > 0, "expected sent frames");
 
@@ -108,18 +150,20 @@ fn esinet1_v4_tcp() {
 
 #[test]
 fn esinet1_v4_udp() {
-    let frames = parse_sample("esinet1-v4-udp.dump.20");
+    let result = parse_sample("esinet1-v4-udp.dump.20");
+    let frames = &result.frames;
     if frames.is_empty() {
         return;
     }
-    assert_all_frames_valid(&frames, "esinet1-v4-udp");
+    assert_all_frames_valid(frames, "esinet1-v4-udp");
+    assert_parse_stats(&result.stats, "esinet1-v4-udp.dump.20", 1);
 
     assert!(
         frames.iter().all(|f| f.transport == Transport::Udp),
         "expected all UDP frames"
     );
 
-    let (recv, sent) = count_by_direction(&frames);
+    let (recv, sent) = count_by_direction(frames);
     eprintln!(
         "esinet1-v4-udp.dump.20: {} frames ({} recv, {} sent)",
         frames.len(),
@@ -137,11 +181,13 @@ fn esinet1_v4_udp() {
 
 #[test]
 fn esinet1_v6_tls() {
-    let frames = parse_sample("esinet1-v6-tls.dump.20");
+    let result = parse_sample("esinet1-v6-tls.dump.20");
+    let frames = &result.frames;
     if frames.is_empty() {
         return;
     }
-    assert_all_frames_valid(&frames, "esinet1-v6-tls");
+    assert_all_frames_valid(frames, "esinet1-v6-tls");
+    assert_parse_stats(&result.stats, "esinet1-v6-tls.dump.20", 1);
 
     assert!(
         frames.iter().all(|f| f.transport == Transport::Tls),
@@ -157,7 +203,7 @@ fn esinet1_v6_tls() {
         );
     }
 
-    let (recv, sent) = count_by_direction(&frames);
+    let (recv, sent) = count_by_direction(frames);
     eprintln!(
         "esinet1-v6-tls.dump.20: {} frames ({} recv, {} sent)",
         frames.len(),
@@ -168,11 +214,13 @@ fn esinet1_v6_tls() {
 
 #[test]
 fn internal_v4() {
-    let frames = parse_sample("internal-v4.dump.20");
+    let result = parse_sample("internal-v4.dump.20");
+    let frames = &result.frames;
     if frames.is_empty() {
         return;
     }
-    assert_all_frames_valid(&frames, "internal-v4");
+    assert_all_frames_valid(frames, "internal-v4");
+    assert_parse_stats(&result.stats, "internal-v4.dump.20", 1);
 
     assert!(
         frames.iter().all(|f| f.transport == Transport::Tcp),
@@ -193,11 +241,13 @@ fn internal_v4() {
 
 #[test]
 fn internal_v6() {
-    let frames = parse_sample("internal-v6.dump.20");
+    let result = parse_sample("internal-v6.dump.20");
+    let frames = &result.frames;
     if frames.is_empty() {
         return;
     }
-    assert_all_frames_valid(&frames, "internal-v6");
+    assert_all_frames_valid(frames, "internal-v6");
+    assert_parse_stats(&result.stats, "internal-v6.dump.20", 1);
 
     assert!(
         frames.iter().all(|f| f.transport == Transport::Tcp),
@@ -218,11 +268,13 @@ fn internal_v6() {
 
 #[test]
 fn esinet1_v6_tcp() {
-    let frames = parse_sample("esinet1-v6-tcp.dump.205");
+    let result = parse_sample("esinet1-v6-tcp.dump.205");
+    let frames = &result.frames;
     if frames.is_empty() {
         return;
     }
-    assert_all_frames_valid(&frames, "esinet1-v6-tcp");
+    assert_all_frames_valid(frames, "esinet1-v6-tcp");
+    assert_parse_stats(&result.stats, "esinet1-v6-tcp.dump.205", 1);
 
     assert!(
         frames.iter().all(|f| f.transport == Transport::Tcp),
@@ -237,7 +289,7 @@ fn esinet1_v6_tcp() {
         );
     }
 
-    let (recv, sent) = count_by_direction(&frames);
+    let (recv, sent) = count_by_direction(frames);
     assert!(recv > 0, "expected recv frames");
     assert!(sent > 0, "expected sent frames");
 
@@ -257,11 +309,13 @@ fn esinet1_v6_tcp() {
 
 #[test]
 fn esinet1_v6_udp() {
-    let frames = parse_sample("esinet1-v6-udp.dump.205");
+    let result = parse_sample("esinet1-v6-udp.dump.205");
+    let frames = &result.frames;
     if frames.is_empty() {
         return;
     }
-    assert_all_frames_valid(&frames, "esinet1-v6-udp");
+    assert_all_frames_valid(frames, "esinet1-v6-udp");
+    assert_parse_stats(&result.stats, "esinet1-v6-udp.dump.205", 1);
 
     assert!(
         frames.iter().all(|f| f.transport == Transport::Udp),
@@ -276,7 +330,7 @@ fn esinet1_v6_udp() {
         );
     }
 
-    let (recv, sent) = count_by_direction(&frames);
+    let (recv, sent) = count_by_direction(frames);
     eprintln!(
         "esinet1-v6-udp.dump.205: {} frames ({} recv, {} sent)",
         frames.len(),
@@ -293,18 +347,20 @@ fn esinet1_v6_udp() {
 
 #[test]
 fn esinet1_v4_tls() {
-    let frames = parse_sample("esinet1-v4-tls.dump.193");
+    let result = parse_sample("esinet1-v4-tls.dump.193");
+    let frames = &result.frames;
     if frames.is_empty() {
         return;
     }
-    assert_all_frames_valid(&frames, "esinet1-v4-tls");
+    assert_all_frames_valid(frames, "esinet1-v4-tls");
+    assert_parse_stats(&result.stats, "esinet1-v4-tls.dump.193", 1);
 
     assert!(
         frames.iter().all(|f| f.transport == Transport::Tls),
         "expected all TLS frames"
     );
 
-    let (recv, sent) = count_by_direction(&frames);
+    let (recv, sent) = count_by_direction(frames);
     eprintln!(
         "esinet1-v4-tls.dump.193: {} frames ({} recv, {} sent)",
         frames.len(),
@@ -360,15 +416,22 @@ fn all_samples_consistent_frame_counts() {
         eprintln!("{prefix}: ({} files)", files.len());
         for name in &files {
             let file = File::open(dir.join(name)).unwrap();
-            let frame_count = FrameIterator::new(file).filter_map(Result::ok).count();
-            eprintln!("  {name}: {frame_count} frames");
+            let mut iter = FrameIterator::new(file);
+            let frame_count = iter.by_ref().filter_map(Result::ok).count();
+            let stats = iter.stats();
+            eprintln!(
+                "  {name}: {frame_count} frames, skipped={}",
+                stats.bytes_skipped
+            );
+            assert_parse_stats(stats, name, 1);
         }
     }
 }
 
 #[test]
 fn tcp_has_multiframe_sequences() {
-    let frames = parse_sample("esinet1-v4-tcp.dump.20");
+    let result = parse_sample("esinet1-v4-tcp.dump.20");
+    let frames = &result.frames;
     if frames.is_empty() {
         return;
     }
@@ -407,13 +470,14 @@ fn tcp_has_multiframe_sequences() {
 
 #[test]
 fn byte_count_distribution() {
-    let frames = parse_sample("esinet1-v4-tcp.dump.20");
+    let result = parse_sample("esinet1-v4-tcp.dump.20");
+    let frames = &result.frames;
     if frames.is_empty() {
         return;
     }
 
     let mut sizes: HashMap<usize, usize> = HashMap::new();
-    for f in &frames {
+    for f in frames {
         *sizes.entry(f.byte_count).or_default() += 1;
     }
 
@@ -452,7 +516,8 @@ fn file_concatenation_two_dumps() {
 
     // Parse concatenated stream
     let chain = std::io::Read::chain(File::open(&path1).unwrap(), File::open(&path2).unwrap());
-    let combined_frames: Vec<_> = FrameIterator::new(chain).filter_map(Result::ok).collect();
+    let mut combined_iter = FrameIterator::new(chain);
+    let combined_frames: Vec<_> = combined_iter.by_ref().filter_map(Result::ok).collect();
 
     // The concatenated parse should recover: we may lose the truncated first frame
     // of file 2 (absorbed or skipped), but the rest should parse fine.
@@ -479,22 +544,27 @@ fn file_concatenation_two_dumps() {
         mismatches, 0,
         "concatenated parse should have zero byte_count mismatches"
     );
+
+    // Two files chained: at most 2 partial first frames (one per file boundary)
+    assert_parse_stats(combined_iter.stats(), "concatenated dump.29+dump.28", 2);
 }
 
 #[test]
 fn esinet1_v4_tcp_150() {
-    let frames = parse_sample("esinet1-v4-tcp.dump.150");
+    let result = parse_sample("esinet1-v4-tcp.dump.150");
+    let frames = &result.frames;
     if frames.is_empty() {
         return;
     }
-    assert_all_frames_valid(&frames, "esinet1-v4-tcp.dump.150");
+    assert_all_frames_valid(frames, "esinet1-v4-tcp.dump.150");
+    assert_parse_stats(&result.stats, "esinet1-v4-tcp.dump.150", 1);
 
     assert!(
         frames.iter().all(|f| f.transport == Transport::Tcp),
         "expected all TCP frames"
     );
 
-    let (recv, sent) = count_by_direction(&frames);
+    let (recv, sent) = count_by_direction(frames);
     assert!(recv > 0, "expected recv frames");
     assert!(sent > 0, "expected sent frames");
 

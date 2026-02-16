@@ -491,7 +491,13 @@ impl<R: Read> Iterator for FrameIterator<R> {
                             .map(|p| p + 1)
                             .unwrap_or(self.buf.len())
                     };
-                    self.consume_skipped(skip, SkipReason::InvalidHeader);
+                    let reason = if self.buf.starts_with(b"recv ") || self.buf.starts_with(b"sent ")
+                    {
+                        SkipReason::InvalidHeader
+                    } else {
+                        SkipReason::PartialFirstFrame
+                    };
+                    self.consume_skipped(skip, reason);
                     return Some(Err(e));
                 }
             }
@@ -1083,13 +1089,37 @@ mod tests {
     }
 
     #[test]
-    fn stats_invalid_header_skip() {
+    fn stats_mid_stream_partial_frame() {
+        // SIP content between valid frames (file concatenation scenario)
         let mut data = Vec::new();
         data.extend_from_slice(
             b"recv 5 bytes from tcp/1.1.1.1:5060 at 00:00:00.000000:\nhello\x0B\n",
         );
-        // Invalid header between valid frames — triggers recovery
         data.extend_from_slice(b"Content-Type: application/sdp\r\n\r\nv=0\r\n");
+        data.extend_from_slice(b"\x0B\n");
+        data.extend_from_slice(b"sent 3 bytes to tcp/3.3.3.3:5060 at 02:00:00.000000:\nbar\x0B\n");
+
+        let mut iter = FrameIterator::new(&data[..]);
+        let items: Vec<Result<Frame, ParseError>> = iter.by_ref().collect();
+        let frames: Vec<Frame> = items.into_iter().filter_map(Result::ok).collect();
+        assert_eq!(frames.len(), 2);
+        let stats = iter.stats();
+        assert!(stats.bytes_skipped > 0);
+        assert_eq!(stats.unparsed_regions.len(), 1);
+        assert_eq!(
+            stats.unparsed_regions[0].reason,
+            crate::types::SkipReason::PartialFirstFrame
+        );
+    }
+
+    #[test]
+    fn stats_invalid_header_skip() {
+        // Malformed frame header (starts with recv/sent but unparseable)
+        let mut data = Vec::new();
+        data.extend_from_slice(
+            b"recv 5 bytes from tcp/1.1.1.1:5060 at 00:00:00.000000:\nhello\x0B\n",
+        );
+        data.extend_from_slice(b"recv CORRUPT HEADER garbage\n");
         data.extend_from_slice(b"\x0B\n");
         data.extend_from_slice(b"sent 3 bytes to tcp/3.3.3.3:5060 at 02:00:00.000000:\nbar\x0B\n");
 

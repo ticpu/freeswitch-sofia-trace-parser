@@ -139,26 +139,37 @@ for frame in FrameIterator::new(chain) {
 - EOF without trailing `\x0B\n`
 - Multipart MIME bodies (SDP + PIDF/EIDO splitting for NG-911)
 - JSON body unescaping for `application/json` and `application/*+json` content types
+- Byte-level input coverage tracking (`ParseStats` with unparsed region reporting)
 
 ## Validated Against Production Data
 
-Tested against 53 production dump files (~5.5GB) from FreeSWITCH NG-911 infrastructure:
+Tested against 83 production dump files (~12GB) from FreeSWITCH NG-911 infrastructure:
 
-| Profile | Frames | Messages | Multi-frame | byte_count mismatches |
-|---|---|---|---|---|
-| TCP IPv4 (10 files) | 4.8M | 4.6M | 17,935 (max 6) | 0 |
-| UDP IPv4 (10 files) | 4.1M | 4.1M (1:1) | 0 | 0 |
-| TLS IPv6 (11 files) | 4.7M | 4.7M | 108 | 0 |
-| TLS IPv4 (2 files) | 252K | 251K | 70 | 0 |
-| Internal TCP v4 (10 files) | 605K | - | - | 0 |
-| Internal TCP v6 (10 files) | 716K | - | - | 0 |
+| Profile | Files | Frames | Messages | Multi-frame | byte_count mismatches |
+|---|---|---|---|---|---|
+| TCP IPv4 | 14 | 6.2M | 6.0M | 21,492 (max 7) | 0 |
+| UDP IPv4 | 13 | 4.8M | 4.8M (1:1) | 0 | 0 |
+| TLS IPv6 | 18 | 5.9M | 5.9M | 108 | 0 |
+| TLS IPv4 | 5 | 660K | 660K | 70 | 0 |
+| TCP IPv6 | 3 | 327K | 327K | - | 0 |
+| UDP IPv6 | 3 | 301K | 301K (1:1) | 0 | 0 |
+| Internal TCP v4 | 13 | 723K | - | - | 0 |
+| Internal TCP v6 | 13 | 836K | - | - | 0 |
 
 - Zero byte_count mismatches across all frames
 - 99.99%+ of reassembled messages start with a valid SIP request/response line
-- Level 3 SIP parsing: 99.995% success rate on TCP (24/461,527 unparseable TCP reassembly fragments)
-- Level 3 SIP parsing: 100% success rate on UDP (466,757/466,757)
-- Multipart body splitting: 1,208 multipart messages, 2,414 parts (SDP + PIDF), 0 failures
+- Level 3 SIP parsing: 100% on all tested profiles (TCP, UDP, TLS)
+- Multipart body splitting: 1,223 multipart messages, 2,446 parts (SDP + PIDF), 0 failures
 - File concatenation (`cat dump.29 dump.28 |`): 965,515 frames, zero mismatches
+
+### Input coverage tracking
+
+Every sample file is verified for byte-level parse coverage:
+
+- Each file produces exactly 1 unparsed region (the partial first frame from logrotate)
+- Zero invalid header skips across all 83 files
+- Concatenated files produce exactly 2 partial regions (one per file boundary)
+- `ParseStats` exposes `bytes_read`, `bytes_skipped`, and detailed `UnparsedRegion` records
 
 ## CLI Tool
 
@@ -254,7 +265,8 @@ to limit memory usage. Unmatched Call-IDs with only OPTIONS traffic are never bu
 | `--body` | Body only (for SDP/PIDF extraction) |
 | `--raw` | Raw reassembled bytes (level 2) |
 | `--frames` | Raw frames (level 1) |
-| `--stats` | Method and status code distribution |
+| `--stats` | Method and status code distribution + input coverage |
+| `--unparsed` | Report unparsed input regions to stderr (combinable with any mode) |
 
 ## Building
 
@@ -274,7 +286,15 @@ cargo test --test level2_samples -- --nocapture  # TCP reassembly, Content-Lengt
 cargo test --test level3_samples -- --nocapture  # SIP parsing, multipart, method extraction
 ```
 
-See [CLAUDE.md](CLAUDE.md) for testing details.
+Integration tests validate at each parser level:
+
+- **Level 1**: Frame parsing, transport detection, address format, byte_count accuracy, and parse stats coverage (max 1 partial first frame per file, zero invalid header skips)
+- **Level 2**: TCP reassembly, UDP pass-through, interleaved multi-address reassembly, frame accounting, and parse stats delegation
+- **Level 3**: SIP request/response parsing, Call-ID/CSeq extraction, multipart MIME splitting, method distribution, and parse stats delegation
+
+The `all_samples_consistent_frame_counts` test iterates all sample files per profile and asserts parse stats on each individually.
+
+See [CLAUDE.md](CLAUDE.md) for test architecture details.
 
 ## License
 
