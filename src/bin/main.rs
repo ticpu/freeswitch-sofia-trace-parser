@@ -5,11 +5,11 @@ use std::process;
 
 use clap::Parser;
 use regex::Regex;
-use tracing::info;
+use tracing::{debug, warn};
 
 use freeswitch_sofia_trace_parser::types::{Direction, SipMessageType};
 use freeswitch_sofia_trace_parser::{
-    FrameIterator, GrepFilter, MessageIterator, ParseStats, ParsedMessageIterator,
+    FrameIterator, GrepFilter, MessageIterator, ParseError, ParseStats, ParsedMessageIterator,
     ParsedSipMessage, SipMessage,
 };
 
@@ -397,7 +397,7 @@ fn run_frames(reader: Box<dyn Read>, capture_skipped: bool) -> ParseStats {
                 );
                 print_lossy(&frame.content);
             }
-            Err(e) => info!("frame error: {e}"),
+            Err(ref e) => log_parse_error("frame error", e),
         }
     }
     iter.stats().clone()
@@ -420,7 +420,7 @@ fn run_raw(reader: Box<dyn Read>, capture_skipped: bool) -> ParseStats {
                 );
                 print_lossy(&msg.content);
             }
-            Err(e) => info!("message error: {e}"),
+            Err(ref e) => log_parse_error("message error", e),
         }
     }
     iter.parse_stats().clone()
@@ -548,7 +548,7 @@ fn run_filtered(
                 }
                 output_message(mode, &msg);
             }
-            Err(e) => info!("parse error: {e}"),
+            Err(ref e) => log_parse_error("parse error", e),
         }
     }
     iter.parse_stats().clone()
@@ -574,16 +574,16 @@ fn run_dialog(
     for result in &mut iter {
         let sip_msg = match result {
             Ok(m) => m,
-            Err(e) => {
-                info!("message error: {e}");
+            Err(ref e) => {
+                log_parse_error("message error", e);
                 continue;
             }
         };
 
         let parsed = match sip_msg.parse() {
             Ok(p) => p,
-            Err(e) => {
-                info!("parse error: {e}");
+            Err(ref e) => {
+                log_parse_error("parse error", e);
                 continue;
             }
         };
@@ -649,11 +649,18 @@ fn run_dialog(
     for sip_msg in &matched_messages {
         match sip_msg.parse() {
             Ok(parsed) => output_message(mode, &parsed),
-            Err(e) => info!("parse error on output: {e}"),
+            Err(ref e) => log_parse_error("parse error on output", e),
         }
     }
 
     iter.parse_stats().clone()
+}
+
+fn log_parse_error(context: &str, e: &ParseError) {
+    match e {
+        ParseError::TransportNoise { .. } => debug!("{context}: {e}"),
+        _ => warn!("{context}: {e}"),
+    }
 }
 
 fn print_unparsed(stats: &ParseStats) {

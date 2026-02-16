@@ -337,6 +337,18 @@ impl<R: Read> FrameIterator<R> {
         Ok(true)
     }
 
+    /// Check if skipped content is a truncated frame from a logrotate file boundary.
+    ///
+    /// Detection: the skipped content ends with `\r\n\r\n\x0B\n` — the SIP header/body
+    /// terminator followed by the frame boundary marker. This pattern indicates the tail
+    /// of a SIP frame that was split across logrotated dump files.
+    fn is_replay(&self, skipped: &[u8]) -> bool {
+        if self.frame_count == 0 {
+            return false;
+        }
+        skipped.ends_with(b"\r\n\r\n\x0B\n")
+    }
+
     /// Find the next `\x0B\n` boundary that is followed by a valid frame header.
     fn find_boundary(&self, start: usize) -> Option<usize> {
         let finder = memmem::Finder::new(b"\x0B\n");
@@ -507,8 +519,15 @@ impl<R: Read> Iterator for FrameIterator<R> {
                     let reason = if self.buf.starts_with(b"recv ") || self.buf.starts_with(b"sent ")
                     {
                         SkipReason::InvalidHeader
-                    } else {
+                    } else if self.frame_count == 0 {
                         SkipReason::PartialFirstFrame
+                    } else {
+                        let skipped = &self.buf[..skip];
+                        if self.is_replay(skipped) {
+                            SkipReason::ReplayedFrame
+                        } else {
+                            SkipReason::MidStreamSkip
+                        }
                     };
                     self.consume_skipped(skip, reason);
                     return Some(Err(e));
@@ -560,7 +579,8 @@ impl<R: Read> Iterator for FrameIterator<R> {
             // Fall back to scanning for \x0B\n + valid header
             if let Some(boundary_pos) = self.find_boundary(content_start) {
                 let content = self.buf[content_start..boundary_pos].to_vec();
-                self.consume(boundary_pos + 2);
+                let drain_to = boundary_pos + 2;
+                self.consume(drain_to);
                 self.frame_count += 1;
 
                 if content.len() != byte_count {
@@ -594,7 +614,24 @@ impl<R: Read> Iterator for FrameIterator<R> {
                 self.consume(len);
                 self.frame_count += 1;
 
-                if content.len() != byte_count {
+                if content.len() < byte_count {
+                    let missing = byte_count - content.len();
+                    warn!(
+                        frame = self.frame_count,
+                        expected = byte_count,
+                        actual = content.len(),
+                        missing,
+                        "incomplete frame at EOF"
+                    );
+                    self.stats
+                        .unparsed_regions
+                        .push(crate::types::UnparsedRegion {
+                            offset: self.offset,
+                            length: missing as u64,
+                            reason: SkipReason::IncompleteFrame,
+                            data: None,
+                        });
+                } else if content.len() != byte_count {
                     debug!(
                         frame = self.frame_count,
                         expected = byte_count,
@@ -1127,13 +1164,15 @@ mod tests {
 
     #[test]
     fn stats_replayed_frame() {
+        // Simulate logrotate: a frame's tail (SIP headers ending with \r\n\r\n\x0B\n)
+        // appears between two valid frames at a file boundary.
         let frame1 = b"recv 5 bytes from tcp/1.1.1.1:5060 at 00:00:00.000000:\nhello\x0B\n";
+        let replay = b"Route: <sip:10.0.0.1:5060;lr>\r\nContent-Length: 0\r\n\r\n\x0B\n";
         let frame2 = b"sent 3 bytes to tcp/3.3.3.3:5060 at 02:00:00.000000:\nbar\x0B\n";
 
         let mut data = Vec::new();
         data.extend_from_slice(frame1);
-        // Replay: tail of frame1 re-appears (logrotate race)
-        data.extend_from_slice(&frame1[frame1.len() - 10..]);
+        data.extend_from_slice(replay);
         data.extend_from_slice(frame2);
 
         let mut iter = FrameIterator::new(&data[..]);

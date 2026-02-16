@@ -139,6 +139,9 @@ for frame in FrameIterator::new(chain) {
 - EOF without trailing `\x0B\n`
 - Multipart MIME bodies (SDP + PIDF/EIDO splitting for NG-911)
 - JSON body unescaping for `application/json` and `application/*+json` content types
+- TLS keep-alive whitespace (RFC 5626 CRLF probes, sofia-sip bare `\n`)
+- Logrotate replay detection (partial frame re-written at start of new file)
+- Incomplete frames at EOF (byte_count exceeds available content)
 - Byte-level input coverage tracking (`ParseStats` with unparsed region reporting)
 
 ## Validated Against Production Data
@@ -164,12 +167,17 @@ Tested against 83 production dump files (~12GB) from FreeSWITCH NG-911 infrastru
 
 ### Input coverage tracking
 
-Every sample file is verified for byte-level parse coverage:
+Every sample file is verified for byte-level parse coverage. Each unparsed region is
+classified by `SkipReason`:
 
-- Each file produces exactly 1 unparsed region (the partial first frame from logrotate)
-- Zero invalid header skips across all 83 files
-- Concatenated files produce exactly 2 partial regions (one per file boundary)
-- `ParseStats` exposes `bytes_read`, `bytes_skipped`, and detailed `UnparsedRegion` records
+- `PartialFirstFrame` — truncated frame at start of file (logrotate, pipe, grep extract)
+- `ReplayedFrame` — logrotate wrote a partial frame tail at the start of the new file
+- `MidStreamSkip` — unrecoverable bytes skipped mid-stream (e.g., TCP reassembly edge case)
+- `IncompleteFrame` — frame at EOF with fewer bytes than declared in the header
+- `InvalidHeader` — data starts with `recv`/`sent` but header fails to parse
+
+`ParseStats` exposes `bytes_read`, `bytes_skipped`, and detailed `UnparsedRegion` records
+with offset, length, and skip reason for each region.
 
 ## CLI Tool
 

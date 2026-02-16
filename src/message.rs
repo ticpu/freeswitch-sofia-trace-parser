@@ -151,24 +151,28 @@ fn extract_complete(buf: &mut ConnectionBuffer, key: &(Direction, String)) -> Ve
 
         // Skip non-SIP prefix (body fragments from incomplete prior messages)
         if !is_sip_start(&buf.content) {
-            // Skip leading CRLF (inter-message padding)
-            let mut crlf_skip = 0;
-            while crlf_skip + 1 < buf.content.len()
-                && buf.content[crlf_skip] == b'\r'
-                && buf.content[crlf_skip + 1] == b'\n'
-            {
-                crlf_skip += 2;
-            }
-            if crlf_skip > 0
-                && crlf_skip < buf.content.len()
-                && is_sip_start(&buf.content[crlf_skip..])
-            {
-                trace!(
-                    skipped_bytes = crlf_skip,
-                    "skipped inter-message CRLF padding"
-                );
-                buf.content.drain(..crlf_skip);
-                continue;
+            // Drain leading whitespace (CRLF padding, bare LF keep-alives, etc.)
+            let ws_len = buf
+                .content
+                .iter()
+                .position(|&b| !matches!(b, b'\r' | b'\n' | b' ' | b'\t'))
+                .unwrap_or(buf.content.len());
+
+            if ws_len > 0 {
+                if ws_len == buf.content.len() {
+                    trace!(
+                        bytes = ws_len,
+                        address = %key.1,
+                        "drained transport whitespace"
+                    );
+                    buf.content.clear();
+                    break;
+                }
+                if is_sip_start(&buf.content[ws_len..]) {
+                    trace!(bytes = ws_len, "drained inter-message whitespace padding");
+                    buf.content.drain(..ws_len);
+                    continue;
+                }
             }
 
             match find_sip_start(&buf.content) {

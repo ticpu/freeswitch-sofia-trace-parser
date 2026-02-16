@@ -76,6 +76,17 @@ fn content_preview(content: &[u8], max_len: usize) -> String {
 fn parse_sip_message(msg: &SipMessage) -> Result<ParsedSipMessage, ParseError> {
     let content = &msg.content;
 
+    if content
+        .iter()
+        .all(|&b| matches!(b, b'\r' | b'\n' | b' ' | b'\t'))
+    {
+        return Err(ParseError::TransportNoise {
+            bytes: content.len(),
+            transport: msg.transport,
+            address: msg.address.clone(),
+        });
+    }
+
     parse_sip_content(msg, content).map_err(|e| {
         let reason = match e {
             ParseError::InvalidMessage(reason) => reason,
