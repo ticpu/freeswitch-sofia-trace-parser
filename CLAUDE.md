@@ -17,6 +17,23 @@ cargo test --test level2_samples    # Level 2 integration tests (requires sample
 cargo test --test level3_samples    # Level 3 integration tests (requires samples/)
 ```
 
+## Release Workflow
+
+Before tagging a release:
+
+```sh
+cargo clippy --release -- -D warnings
+cargo test --release
+cargo build --release
+```
+
+Tag with a signed annotated tag:
+
+```sh
+git tag -as v0.X.0 -m "v0.X.0"
+git push --tags
+```
+
 ## Test Architecture
 
 ### Unit tests (`cargo test --lib`)
