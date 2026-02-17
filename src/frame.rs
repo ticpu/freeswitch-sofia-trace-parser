@@ -3,7 +3,9 @@ use std::io::Read;
 use memchr::memmem;
 use tracing::{debug, info, trace, warn};
 
-use crate::types::{Direction, Frame, ParseStats, SkipReason, Timestamp, Transport};
+use crate::types::{
+    Direction, Frame, ParseStats, SkipReason, SkipTracking, Timestamp, Transport, UnparsedRegion,
+};
 
 const RECV_PREFIX: &[u8] = b"recv ";
 const SENT_PREFIX: &[u8] = b"sent ";
@@ -279,7 +281,7 @@ pub struct FrameIterator<R> {
     frame_count: u64,
     offset: u64,
     stats: ParseStats,
-    capture_skipped: bool,
+    skip_tracking: SkipTracking,
 }
 
 impl<R: Read> FrameIterator<R> {
@@ -291,17 +293,32 @@ impl<R: Read> FrameIterator<R> {
             frame_count: 0,
             offset: 0,
             stats: ParseStats::default(),
-            capture_skipped: false,
+            skip_tracking: SkipTracking::CountOnly,
         }
     }
 
     pub fn capture_skipped(mut self, enable: bool) -> Self {
-        self.capture_skipped = enable;
+        if enable {
+            self.skip_tracking = SkipTracking::CaptureData;
+        }
+        self
+    }
+
+    pub fn skip_tracking(mut self, tracking: SkipTracking) -> Self {
+        self.skip_tracking = tracking;
         self
     }
 
     pub fn stats(&self) -> &ParseStats {
         &self.stats
+    }
+
+    pub fn stats_mut(&mut self) -> &mut ParseStats {
+        &mut self.stats
+    }
+
+    pub fn drain_unparsed(&mut self) -> Vec<UnparsedRegion> {
+        self.stats.drain_regions()
     }
 
     fn consume(&mut self, n: usize) {
@@ -310,19 +327,19 @@ impl<R: Read> FrameIterator<R> {
     }
 
     fn consume_skipped(&mut self, n: usize, reason: SkipReason) {
-        let data = if self.capture_skipped {
-            Some(self.buf[..n].to_vec())
-        } else {
-            None
-        };
-        self.stats
-            .unparsed_regions
-            .push(crate::types::UnparsedRegion {
+        if self.skip_tracking != SkipTracking::CountOnly {
+            let data = if self.skip_tracking == SkipTracking::CaptureData {
+                Some(self.buf[..n].to_vec())
+            } else {
+                None
+            };
+            self.stats.unparsed_regions.push(UnparsedRegion {
                 offset: self.offset,
                 length: n as u64,
                 reason,
                 data,
             });
+        }
         self.stats.bytes_skipped += n as u64;
         self.consume(n);
     }
@@ -636,14 +653,14 @@ impl<R: Read> Iterator for FrameIterator<R> {
                         missing,
                         "incomplete frame at EOF"
                     );
-                    self.stats
-                        .unparsed_regions
-                        .push(crate::types::UnparsedRegion {
+                    if self.skip_tracking != SkipTracking::CountOnly {
+                        self.stats.unparsed_regions.push(UnparsedRegion {
                             offset: self.offset,
                             length: missing as u64,
                             reason: SkipReason::IncompleteFrame,
                             data: None,
                         });
+                    }
                 } else if content.len() != byte_count {
                     debug!(
                         frame = self.frame_count,
@@ -673,6 +690,7 @@ impl<R: Read> Iterator for FrameIterator<R> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::types::SkipTracking;
 
     #[test]
     fn parse_recv_ipv4_tcp() {
@@ -1113,7 +1131,7 @@ mod tests {
         data.extend_from_slice(
             b"recv 5 bytes from tcp/1.1.1.1:5060 at 00:00:00.000000:\nhello\x0B\n",
         );
-        let mut iter = FrameIterator::new(&data[..]);
+        let mut iter = FrameIterator::new(&data[..]).skip_tracking(SkipTracking::TrackRegions);
         let frames: Vec<Frame> = iter.by_ref().collect::<Result<Vec<_>, _>>().unwrap();
         assert_eq!(frames.len(), 1);
         let stats = iter.stats();
@@ -1162,7 +1180,7 @@ mod tests {
         data.extend_from_slice(b"\x0B\n");
         data.extend_from_slice(b"sent 3 bytes to tcp/3.3.3.3:5060 at 02:00:00.000000:\nbar\x0B\n");
 
-        let mut iter = FrameIterator::new(&data[..]);
+        let mut iter = FrameIterator::new(&data[..]).skip_tracking(SkipTracking::TrackRegions);
         let items: Vec<Result<Frame, ParseError>> = iter.by_ref().collect();
         let frames: Vec<Frame> = items.into_iter().filter_map(Result::ok).collect();
         assert_eq!(frames.len(), 2);
@@ -1188,7 +1206,7 @@ mod tests {
         data.extend_from_slice(replay);
         data.extend_from_slice(frame2);
 
-        let mut iter = FrameIterator::new(&data[..]);
+        let mut iter = FrameIterator::new(&data[..]).skip_tracking(SkipTracking::TrackRegions);
         let items: Vec<Result<Frame, ParseError>> = iter.by_ref().collect();
         let frames: Vec<Frame> = items.into_iter().filter_map(Result::ok).collect();
         assert_eq!(frames.len(), 2);
@@ -1211,7 +1229,7 @@ mod tests {
         data.extend_from_slice(b"partial content only");
         // No \x0B\n boundary — EOF truncation
 
-        let mut iter = FrameIterator::new(&data[..]);
+        let mut iter = FrameIterator::new(&data[..]).skip_tracking(SkipTracking::TrackRegions);
         let items: Vec<Result<Frame, ParseError>> = iter.by_ref().collect();
         let frames: Vec<Frame> = items.into_iter().filter_map(Result::ok).collect();
         assert_eq!(frames.len(), 2, "truncated frame should still be returned");
@@ -1236,7 +1254,7 @@ mod tests {
         data.extend_from_slice(b"\x0B\n");
         data.extend_from_slice(b"sent 3 bytes to tcp/3.3.3.3:5060 at 02:00:00.000000:\nbar\x0B\n");
 
-        let mut iter = FrameIterator::new(&data[..]);
+        let mut iter = FrameIterator::new(&data[..]).skip_tracking(SkipTracking::TrackRegions);
         let items: Vec<Result<Frame, ParseError>> = iter.by_ref().collect();
         let frames: Vec<Frame> = items.into_iter().filter_map(Result::ok).collect();
         assert_eq!(frames.len(), 2);
@@ -1257,7 +1275,7 @@ mod tests {
         data.extend_from_slice(
             b"recv 5 bytes from tcp/1.1.1.1:5060 at 00:00:00.000000:\nhello\x0B\n",
         );
-        let mut iter = FrameIterator::new(&data[..]);
+        let mut iter = FrameIterator::new(&data[..]).skip_tracking(SkipTracking::TrackRegions);
         let items: Vec<Result<Frame, ParseError>> = iter.by_ref().collect();
         let frames: Vec<Frame> = items.into_iter().filter_map(Result::ok).collect();
         assert_eq!(frames.len(), 1);
@@ -1279,7 +1297,7 @@ mod tests {
         data.resize(data.len() + garbage_len, b'x');
         data.extend_from_slice(b"\x0B\n");
         data.extend_from_slice(b"sent 3 bytes to tcp/3.3.3.3:5060 at 02:00:00.000000:\nbar\x0B\n");
-        let mut iter = FrameIterator::new(&data[..]);
+        let mut iter = FrameIterator::new(&data[..]).skip_tracking(SkipTracking::TrackRegions);
         let items: Vec<Result<Frame, ParseError>> = iter.by_ref().collect();
         let frames: Vec<Frame> = items.into_iter().filter_map(Result::ok).collect();
         assert_eq!(frames.len(), 2);
@@ -1300,7 +1318,7 @@ mod tests {
         data.extend_from_slice(
             b"recv 5 bytes from tcp/1.1.1.1:5060 at 00:00:00.000000:\nhello\x0B\n",
         );
-        let mut iter = FrameIterator::new(&data[..]);
+        let mut iter = FrameIterator::new(&data[..]).skip_tracking(SkipTracking::TrackRegions);
         let frames: Vec<Frame> = iter.by_ref().collect::<Result<Vec<_>, _>>().unwrap();
         assert_eq!(frames.len(), 1);
         let stats = iter.stats();
@@ -1330,7 +1348,22 @@ mod tests {
     }
 
     #[test]
-    fn stats_no_capture_by_default() {
+    fn stats_track_regions_no_data() {
+        let mut data = Vec::new();
+        data.extend_from_slice(b"partial garbage data");
+        data.extend_from_slice(b"\x0B\n");
+        data.extend_from_slice(
+            b"recv 5 bytes from tcp/1.1.1.1:5060 at 00:00:00.000000:\nhello\x0B\n",
+        );
+        let mut iter = FrameIterator::new(&data[..]).skip_tracking(SkipTracking::TrackRegions);
+        let _: Vec<_> = iter.by_ref().collect::<Result<Vec<_>, _>>().unwrap();
+        let stats = iter.stats();
+        assert_eq!(stats.unparsed_regions.len(), 1);
+        assert!(stats.unparsed_regions[0].data.is_none());
+    }
+
+    #[test]
+    fn stats_count_only_no_regions() {
         let mut data = Vec::new();
         data.extend_from_slice(b"partial garbage data");
         data.extend_from_slice(b"\x0B\n");
@@ -1338,10 +1371,15 @@ mod tests {
             b"recv 5 bytes from tcp/1.1.1.1:5060 at 00:00:00.000000:\nhello\x0B\n",
         );
         let mut iter = FrameIterator::new(&data[..]);
-        let _: Vec<_> = iter.by_ref().collect::<Result<Vec<_>, _>>().unwrap();
+        let frames: Vec<_> = iter.by_ref().collect::<Result<Vec<_>, _>>().unwrap();
+        assert_eq!(frames.len(), 1);
         let stats = iter.stats();
-        assert_eq!(stats.unparsed_regions.len(), 1);
-        assert!(stats.unparsed_regions[0].data.is_none());
+        let skipped = b"partial garbage data\x0B\n".len() as u64;
+        assert_eq!(stats.bytes_skipped, skipped);
+        assert!(
+            stats.unparsed_regions.is_empty(),
+            "CountOnly should not accumulate regions"
+        );
     }
 
     #[test]

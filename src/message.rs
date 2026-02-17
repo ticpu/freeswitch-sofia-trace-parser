@@ -5,17 +5,28 @@ use memchr::memmem;
 use tracing::{debug, trace, warn};
 
 use crate::frame::{FrameIterator, ParseError};
-use crate::types::{Direction, ParseStats, SipMessage, Timestamp, Transport};
+use crate::types::{
+    Direction, ParseStats, SipMessage, SkipTracking, Timestamp, Transport, UnparsedRegion,
+};
 
 static CRLF: LazyLock<memmem::Finder<'static>> = LazyLock::new(|| memmem::Finder::new(b"\r\n"));
 static CRLFCRLF: LazyLock<memmem::Finder<'static>> =
     LazyLock::new(|| memmem::Finder::new(b"\r\n\r\n"));
+
+/// RFC 793 default TCP keepalive timeout.
+/// Connection buffers inactive for longer than this are considered stale
+/// and evicted to prevent unbounded memory growth when processing
+/// multi-day dump file streams with ephemeral TLS source ports.
+const STALE_TIMEOUT_SECS: u64 = 7200;
 
 pub struct MessageIterator<R> {
     frames: FrameIterator<R>,
     buffers: HashMap<(Direction, String), ConnectionBuffer>,
     ready: VecDeque<SipMessage>,
     exhausted: bool,
+    current_day: u32,
+    last_time_secs: u32,
+    last_sweep_abs_secs: u64,
 }
 
 struct ConnectionBuffer {
@@ -23,6 +34,8 @@ struct ConnectionBuffer {
     timestamp: Timestamp,
     content: Vec<u8>,
     frame_count: usize,
+    last_seen_day: u32,
+    last_seen_time_secs: u32,
 }
 
 impl<R: std::io::Read> MessageIterator<R> {
@@ -32,6 +45,9 @@ impl<R: std::io::Read> MessageIterator<R> {
             buffers: HashMap::new(),
             ready: VecDeque::new(),
             exhausted: false,
+            current_day: 0,
+            last_time_secs: 0,
+            last_sweep_abs_secs: 0,
         }
     }
 
@@ -40,8 +56,66 @@ impl<R: std::io::Read> MessageIterator<R> {
         self
     }
 
+    pub fn skip_tracking(mut self, tracking: SkipTracking) -> Self {
+        self.frames = self.frames.skip_tracking(tracking);
+        self
+    }
+
     pub fn parse_stats(&self) -> &ParseStats {
         self.frames.stats()
+    }
+
+    pub fn parse_stats_mut(&mut self) -> &mut ParseStats {
+        self.frames.stats_mut()
+    }
+
+    pub fn drain_unparsed(&mut self) -> Vec<UnparsedRegion> {
+        self.frames.drain_unparsed()
+    }
+
+    fn update_time_tracking(&mut self, time_secs: u32) {
+        if time_secs < self.last_time_secs && self.last_time_secs - time_secs > 43200 {
+            self.current_day += 1;
+            debug!(
+                day = self.current_day,
+                prev_secs = self.last_time_secs,
+                curr_secs = time_secs,
+                "detected day rollover"
+            );
+        }
+        self.last_time_secs = time_secs;
+    }
+
+    fn current_abs_secs(&self) -> u64 {
+        self.current_day as u64 * 86400 + self.last_time_secs as u64
+    }
+
+    fn sweep_stale_buffers(&mut self) {
+        let current_abs = self.current_abs_secs();
+        self.buffers.retain(|key, buf| {
+            let buf_abs = buf.last_seen_day as u64 * 86400 + buf.last_seen_time_secs as u64;
+            let elapsed = current_abs.saturating_sub(buf_abs);
+            if elapsed > STALE_TIMEOUT_SECS {
+                if buf.content.is_empty() {
+                    trace!(
+                        address = %key.1,
+                        direction = %key.0,
+                        elapsed_secs = elapsed,
+                        "evicted empty stale connection buffer"
+                    );
+                } else {
+                    warn!(
+                        address = %key.1,
+                        direction = %key.0,
+                        elapsed_secs = elapsed,
+                        pending_bytes = buf.content.len(),
+                        "evicted stale connection buffer with incomplete data"
+                    );
+                }
+                return false;
+            }
+            true
+        });
     }
 
     fn flush_all(&mut self) {
@@ -65,6 +139,7 @@ impl<R: std::io::Read> MessageIterator<R> {
                 }
             }
         }
+        self.buffers.clear();
     }
 }
 
@@ -94,6 +169,15 @@ impl<R: std::io::Read> Iterator for MessageIterator<R> {
                         }));
                     }
 
+                    let time_secs = frame.timestamp.time_of_day_secs();
+                    self.update_time_tracking(time_secs);
+
+                    let current_abs = self.current_abs_secs();
+                    if current_abs.saturating_sub(self.last_sweep_abs_secs) >= STALE_TIMEOUT_SECS {
+                        self.sweep_stale_buffers();
+                        self.last_sweep_abs_secs = current_abs;
+                    }
+
                     let key = (frame.direction, frame.address.clone());
 
                     let buf = self
@@ -104,7 +188,12 @@ impl<R: std::io::Read> Iterator for MessageIterator<R> {
                             timestamp: frame.timestamp,
                             content: Vec::new(),
                             frame_count: 0,
+                            last_seen_day: self.current_day,
+                            last_seen_time_secs: time_secs,
                         });
+
+                    buf.last_seen_day = self.current_day;
+                    buf.last_seen_time_secs = time_secs;
 
                     if buf.content.is_empty() {
                         buf.timestamp = frame.timestamp;
@@ -122,6 +211,10 @@ impl<R: std::io::Read> Iterator for MessageIterator<R> {
 
                     let msgs = extract_complete(buf, &key);
                     self.ready.extend(msgs);
+
+                    if buf.frame_count == 0 && buf.content.is_empty() {
+                        self.buffers.remove(&key);
+                    }
 
                     if let Some(msg) = self.ready.pop_front() {
                         return Some(Ok(msg));
@@ -699,6 +792,8 @@ mod tests {
             },
             content,
             frame_count: 1,
+            last_seen_day: 0,
+            last_seen_time_secs: 0,
         };
         let msgs = extract_complete(&mut buf, &key);
         assert_eq!(msgs.len(), 2);
@@ -725,6 +820,8 @@ mod tests {
             },
             content,
             frame_count: 1,
+            last_seen_day: 0,
+            last_seen_time_secs: 0,
         };
         let msgs = extract_complete(&mut buf, &key);
         assert_eq!(msgs.len(), 1);
@@ -747,6 +844,8 @@ mod tests {
             },
             content,
             frame_count: 1,
+            last_seen_day: 0,
+            last_seen_time_secs: 0,
         };
         let msgs = extract_complete(&mut buf, &key);
         assert!(msgs.is_empty(), "should wait for body to complete");
@@ -769,6 +868,8 @@ mod tests {
             },
             content,
             frame_count: 1,
+            last_seen_day: 0,
+            last_seen_time_secs: 0,
         };
         let msgs = extract_complete(&mut buf, &key);
         assert!(msgs.is_empty(), "should wait for headers to complete");
@@ -970,6 +1071,138 @@ mod tests {
         assert!(
             msgs[0].content.starts_with(b"OPTIONS"),
             "message should start with SIP method, not \\n"
+        );
+    }
+
+    fn make_frame_at(
+        direction: Direction,
+        transport: Transport,
+        addr: &str,
+        content: &[u8],
+        timestamp: &str,
+    ) -> Vec<u8> {
+        let dir_str = match direction {
+            Direction::Recv => "recv",
+            Direction::Sent => "sent",
+        };
+        let prep = match direction {
+            Direction::Recv => "from",
+            Direction::Sent => "to",
+        };
+        let transport_str = match transport {
+            Transport::Tcp => "tcp",
+            Transport::Udp => "udp",
+            Transport::Tls => "tls",
+            Transport::Wss => "wss",
+        };
+        let header = format!(
+            "{dir_str} {} bytes {prep} {transport_str}/{addr} at {timestamp}:\n",
+            content.len()
+        );
+        let mut data = header.into_bytes();
+        data.extend_from_slice(content);
+        data.extend_from_slice(b"\x0B\n");
+        data
+    }
+
+    #[test]
+    fn empty_buffer_removed_after_complete_message() {
+        let sip = b"OPTIONS sip:host SIP/2.0\r\nContent-Length: 0\r\n\r\n";
+        let addr_a = "[::1]:5060";
+        let addr_b = "[::2]:5060";
+
+        let mut data = make_frame(Direction::Recv, Transport::Tcp, addr_a, sip);
+        data.extend_from_slice(&make_frame(Direction::Recv, Transport::Tcp, addr_b, sip));
+
+        let mut iter = MessageIterator::new(&data[..]);
+        let msgs: Vec<SipMessage> = iter.by_ref().collect::<Result<Vec<_>, _>>().unwrap();
+        assert_eq!(msgs.len(), 2);
+        assert!(
+            iter.buffers.is_empty(),
+            "all buffers should be removed after complete messages are extracted"
+        );
+    }
+
+    #[test]
+    fn stale_buffer_evicted_after_timeout() {
+        let sip = b"OPTIONS sip:host SIP/2.0\r\nContent-Length: 0\r\n\r\n";
+        let partial = b"INVITE sip:host SIP/2.0\r\n";
+
+        let mut data = Vec::new();
+        // Partial frame from stale addr at 10:00:00
+        data.extend_from_slice(&make_frame_at(
+            Direction::Recv,
+            Transport::Tls,
+            "[::99]:44444",
+            partial,
+            "2026-02-16 10:00:00.000000",
+        ));
+        // Complete msg from another addr at 12:00:01 (>2h later, triggers sweep)
+        data.extend_from_slice(&make_frame_at(
+            Direction::Recv,
+            Transport::Tls,
+            "[::1]:5060",
+            sip,
+            "2026-02-16 12:00:01.000000",
+        ));
+
+        let mut iter = MessageIterator::new(&data[..]);
+        let msgs: Vec<SipMessage> = iter.by_ref().collect::<Result<Vec<_>, _>>().unwrap();
+
+        assert_eq!(msgs.len(), 1, "should produce the complete message");
+        assert_eq!(msgs[0].address, "[::1]:5060");
+        assert!(
+            iter.buffers.is_empty(),
+            "stale buffer for [::99]:44444 should have been evicted"
+        );
+    }
+
+    #[test]
+    fn day_rollover_detection_with_time_only() {
+        let sip = b"OPTIONS sip:host SIP/2.0\r\nContent-Length: 0\r\n\r\n";
+        let partial = b"INVITE sip:host SIP/2.0\r\n";
+
+        let mut data = Vec::new();
+        // Partial frame at 23:59:00
+        data.extend_from_slice(&make_frame_at(
+            Direction::Recv,
+            Transport::Tcp,
+            "[::99]:44444",
+            partial,
+            "23:59:00.000000",
+        ));
+        // Complete msg at 02:00:01 (next day — rollover detected, >2h from 23:59)
+        data.extend_from_slice(&make_frame_at(
+            Direction::Recv,
+            Transport::Tcp,
+            "[::1]:5060",
+            sip,
+            "02:00:01.000000",
+        ));
+
+        let mut iter = MessageIterator::new(&data[..]);
+        let msgs: Vec<SipMessage> = iter.by_ref().collect::<Result<Vec<_>, _>>().unwrap();
+
+        assert_eq!(msgs.len(), 1);
+        assert_eq!(msgs[0].address, "[::1]:5060");
+        assert_eq!(iter.current_day, 1, "should have detected one day rollover");
+        assert!(
+            iter.buffers.is_empty(),
+            "stale buffer should have been evicted after day rollover"
+        );
+    }
+
+    #[test]
+    fn flush_all_clears_buffers() {
+        let partial = b"INVITE sip:host SIP/2.0\r\n";
+        let data = make_frame(Direction::Recv, Transport::Tcp, "[::1]:5060", partial);
+
+        let mut iter = MessageIterator::new(&data[..]);
+        let msgs: Vec<SipMessage> = iter.by_ref().collect::<Result<Vec<_>, _>>().unwrap();
+        assert_eq!(msgs.len(), 1, "partial should be flushed at EOF");
+        assert!(
+            iter.buffers.is_empty(),
+            "flush_all should clear the HashMap"
         );
     }
 }

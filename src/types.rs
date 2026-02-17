@@ -24,6 +24,13 @@ impl fmt::Display for SkipReason {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SkipTracking {
+    CountOnly,
+    TrackRegions,
+    CaptureData,
+}
+
 #[derive(Debug, Clone)]
 pub struct UnparsedRegion {
     pub offset: u64,
@@ -37,6 +44,12 @@ pub struct ParseStats {
     pub bytes_read: u64,
     pub bytes_skipped: u64,
     pub unparsed_regions: Vec<UnparsedRegion>,
+}
+
+impl ParseStats {
+    pub fn drain_regions(&mut self) -> Vec<UnparsedRegion> {
+        std::mem::take(&mut self.unparsed_regions)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -102,6 +115,14 @@ pub enum Timestamp {
 }
 
 impl Timestamp {
+    pub fn time_of_day_secs(&self) -> u32 {
+        let (h, m, s) = match self {
+            Timestamp::TimeOnly { hour, min, sec, .. } => (*hour, *min, *sec),
+            Timestamp::DateTime { hour, min, sec, .. } => (*hour, *min, *sec),
+        };
+        h as u32 * 3600 + m as u32 * 60 + s as u32
+    }
+
     pub fn sort_key(&self) -> (u16, u8, u8, u8, u8, u8, u32) {
         match self {
             Timestamp::TimeOnly {

@@ -2,7 +2,9 @@ use std::collections::HashMap;
 use std::fs::File;
 use std::path::Path;
 
-use freeswitch_sofia_trace_parser::types::{ParseStats, SipMessageType, SkipReason, Transport};
+use freeswitch_sofia_trace_parser::types::{
+    ParseStats, SipMessageType, SkipReason, SkipTracking, Transport,
+};
 use freeswitch_sofia_trace_parser::{ParsedMessageIterator, ParsedSipMessage};
 
 fn sample_dir() -> &'static Path {
@@ -28,7 +30,7 @@ fn parse_file(name: &str) -> ParseResult {
         };
     }
     let file = File::open(&path).unwrap();
-    let mut iter = ParsedMessageIterator::new(file);
+    let mut iter = ParsedMessageIterator::new(file).skip_tracking(SkipTracking::TrackRegions);
     let mut parsed = Vec::new();
     let mut errors = 0;
     let mut total = 0;

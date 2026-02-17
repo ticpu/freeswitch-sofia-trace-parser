@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::fs::File;
 use std::path::Path;
 
-use freeswitch_sofia_trace_parser::types::{ParseStats, SkipReason, Transport};
+use freeswitch_sofia_trace_parser::types::{ParseStats, SkipReason, SkipTracking, Transport};
 use freeswitch_sofia_trace_parser::MessageIterator;
 
 fn sample_dir() -> &'static Path {
@@ -24,7 +24,7 @@ fn parse_messages(name: &str) -> MessageParseResult {
         };
     }
     let file = File::open(&path).unwrap();
-    let mut iter = MessageIterator::new(file);
+    let mut iter = MessageIterator::new(file).skip_tracking(SkipTracking::TrackRegions);
     let messages: Vec<_> = iter.by_ref().filter_map(Result::ok).collect();
     let stats = iter.parse_stats().clone();
     MessageParseResult { messages, stats }
@@ -71,7 +71,8 @@ fn tcp_reassembly_produces_fewer_messages_than_frames() {
         .filter_map(Result::ok)
         .count();
 
-    let mut iter = MessageIterator::new(File::open(&path).unwrap());
+    let mut iter =
+        MessageIterator::new(File::open(&path).unwrap()).skip_tracking(SkipTracking::TrackRegions);
     let msg_count = iter.by_ref().filter_map(Result::ok).count();
 
     eprintln!("esinet1-v4-tcp.dump.20: {frame_count} frames → {msg_count} messages");
@@ -95,7 +96,8 @@ fn udp_messages_equal_frames() {
         .filter_map(Result::ok)
         .count();
 
-    let mut iter = MessageIterator::new(File::open(&path).unwrap());
+    let mut iter =
+        MessageIterator::new(File::open(&path).unwrap()).skip_tracking(SkipTracking::TrackRegions);
     let msg_count = iter.by_ref().filter_map(Result::ok).count();
 
     eprintln!("esinet1-v4-udp.dump.20: {frame_count} frames → {msg_count} messages");
@@ -146,7 +148,8 @@ fn tls_v6_with_real_traffic() {
         .filter_map(Result::ok)
         .count();
 
-    let mut iter = MessageIterator::new(File::open(&path).unwrap());
+    let mut iter =
+        MessageIterator::new(File::open(&path).unwrap()).skip_tracking(SkipTracking::TrackRegions);
     let msgs: Vec<_> = iter.by_ref().filter_map(Result::ok).collect();
 
     let msg_count = msgs.len();
@@ -179,7 +182,8 @@ fn tls_v4_with_real_traffic() {
         .filter_map(Result::ok)
         .count();
 
-    let mut iter = MessageIterator::new(File::open(&path).unwrap());
+    let mut iter =
+        MessageIterator::new(File::open(&path).unwrap()).skip_tracking(SkipTracking::TrackRegions);
     let msgs: Vec<_> = iter.by_ref().filter_map(Result::ok).collect();
 
     let msg_count = msgs.len();
@@ -203,7 +207,8 @@ fn tcp_v6_messages() {
         .filter_map(Result::ok)
         .count();
 
-    let mut iter = MessageIterator::new(File::open(&path).unwrap());
+    let mut iter =
+        MessageIterator::new(File::open(&path).unwrap()).skip_tracking(SkipTracking::TrackRegions);
     let msg_count = iter.by_ref().filter_map(Result::ok).count();
 
     eprintln!("esinet1-v6-tcp.dump.205: {frame_count} frames → {msg_count} messages");
@@ -227,7 +232,8 @@ fn udp_v6_messages_equal_frames() {
         .filter_map(Result::ok)
         .count();
 
-    let mut iter = MessageIterator::new(File::open(&path).unwrap());
+    let mut iter =
+        MessageIterator::new(File::open(&path).unwrap()).skip_tracking(SkipTracking::TrackRegions);
     let msg_count = iter.by_ref().filter_map(Result::ok).count();
 
     eprintln!("esinet1-v6-udp.dump.205: {frame_count} frames → {msg_count} messages");

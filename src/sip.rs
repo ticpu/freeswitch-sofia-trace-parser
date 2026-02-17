@@ -5,7 +5,10 @@ use memchr::memmem;
 
 use crate::frame::ParseError;
 use crate::message::MessageIterator;
-use crate::types::{MimePart, ParseStats, ParsedSipMessage, SipMessage, SipMessageType};
+use crate::types::{
+    MimePart, ParseStats, ParsedSipMessage, SipMessage, SipMessageType, SkipTracking,
+    UnparsedRegion,
+};
 
 static CRLF: LazyLock<memmem::Finder<'static>> = LazyLock::new(|| memmem::Finder::new(b"\r\n"));
 static CRLFCRLF: LazyLock<memmem::Finder<'static>> =
@@ -33,8 +36,21 @@ impl<R: std::io::Read> ParsedMessageIterator<R> {
         self
     }
 
+    pub fn skip_tracking(mut self, tracking: SkipTracking) -> Self {
+        self.inner = self.inner.skip_tracking(tracking);
+        self
+    }
+
     pub fn parse_stats(&self) -> &ParseStats {
         self.inner.parse_stats()
+    }
+
+    pub fn parse_stats_mut(&mut self) -> &mut ParseStats {
+        self.inner.parse_stats_mut()
+    }
+
+    pub fn drain_unparsed(&mut self) -> Vec<UnparsedRegion> {
+        self.inner.drain_unparsed()
     }
 }
 

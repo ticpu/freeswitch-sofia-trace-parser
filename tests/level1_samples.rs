@@ -2,7 +2,9 @@ use std::collections::HashMap;
 use std::fs::File;
 use std::path::Path;
 
-use freeswitch_sofia_trace_parser::types::{Direction, ParseStats, SkipReason, Transport};
+use freeswitch_sofia_trace_parser::types::{
+    Direction, ParseStats, SkipReason, SkipTracking, Transport,
+};
 use freeswitch_sofia_trace_parser::FrameIterator;
 
 fn sample_dir() -> &'static Path {
@@ -24,7 +26,7 @@ fn parse_sample(name: &str) -> FrameParseResult {
         };
     }
     let file = File::open(&path).unwrap();
-    let mut iter = FrameIterator::new(file);
+    let mut iter = FrameIterator::new(file).skip_tracking(SkipTracking::TrackRegions);
     let mut errors = 0usize;
     let frames: Vec<_> = iter
         .by_ref()
@@ -416,7 +418,7 @@ fn all_samples_consistent_frame_counts() {
         eprintln!("{prefix}: ({} files)", files.len());
         for name in &files {
             let file = File::open(dir.join(name)).unwrap();
-            let mut iter = FrameIterator::new(file);
+            let mut iter = FrameIterator::new(file).skip_tracking(SkipTracking::TrackRegions);
             let frame_count = iter.by_ref().filter_map(Result::ok).count();
             let stats = iter.stats();
             eprintln!(
@@ -516,7 +518,7 @@ fn file_concatenation_two_dumps() {
 
     // Parse concatenated stream
     let chain = std::io::Read::chain(File::open(&path1).unwrap(), File::open(&path2).unwrap());
-    let mut combined_iter = FrameIterator::new(chain);
+    let mut combined_iter = FrameIterator::new(chain).skip_tracking(SkipTracking::TrackRegions);
     let combined_frames: Vec<_> = combined_iter.by_ref().filter_map(Result::ok).collect();
 
     // The concatenated parse should recover: we may lose the truncated first frame
