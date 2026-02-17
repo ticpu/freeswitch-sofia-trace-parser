@@ -180,6 +180,31 @@ classified by `SkipReason`:
 `ParseStats` exposes `bytes_read`, `bytes_skipped`, and detailed `UnparsedRegion` records
 with offset, length, and skip reason for each region.
 
+## Memory Profile
+
+The parser is designed for constant-memory streaming of arbitrarily large inputs,
+including multi-day dump file chains (50GB+). Memory behavior was validated using
+jemalloc heap profiling (`_RJEM_MALLOC_CONF=prof:true`) and gdb inspection of live
+data structures during processing of 50+ chained dump files.
+
+**Parser internals at runtime (gdb-verified):**
+
+- `FrameIterator::buf` — 64KB capacity, ~200 bytes used (single read buffer, never grows)
+- `MessageIterator::buffers` — 0 entries (TCP reassembly buffers evicted after message extraction)
+- `MessageIterator::ready` — 0 entries, capacity 10 (drained each iteration)
+
+**Design choices that maintain constant memory:**
+
+- `SkipTracking` defaults to `CountOnly` — no allocation for unparsed region tracking unless opted in
+- TCP connection buffers are eagerly removed after complete message extraction
+- Stale buffers (>2h inactive) are evicted via time-based sweep to handle TLS ephemeral port accumulation
+- `flush_all()` clears the entire buffer map at EOF
+
+**Consumers processing many files** should open files lazily (one at a time) rather
+than using `Read::chain()` upfront, which keeps all file handles and decompression
+state alive for the entire run. With 50+ XZ-compressed dump files, eager chaining
+consumed 172MB of LZMA decoder state alone.
+
 ## CLI Tool
 
 OPTIONS keepalives are excluded by default (use `--all-methods` to include them).
