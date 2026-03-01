@@ -1,0 +1,48 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Install Rust
+      uses: dtolnay/rust-toolchain@stable
+
+    - name: Cache cargo
+      uses: actions/cache@v4
+      with:
+        path: |
+          ~/.cargo/bin/
+          ~/.cargo/registry/index/
+          ~/.cargo/registry/cache/
+          ~/.cargo/git/db/
+          target/
+        key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.toml') }}
+
+    - name: Check (library)
+      run: cargo check --message-format=short
+
+    - name: Check (library + CLI)
+      run: cargo check --features cli --all-targets --message-format=short
+
+    - name: Clippy
+      run: cargo clippy --features cli --all-targets -- -D warnings
+
+    - name: Test (library)
+      run: cargo test --lib
+
+    - name: Test (binary)
+      run: cargo test --features cli --bin freeswitch-sofia-trace-parser
+
+    - name: Build
+      run: cargo build --features cli --release

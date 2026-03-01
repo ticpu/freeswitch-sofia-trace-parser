@@ -122,4 +122,67 @@ mod tests {
         let input = b"data\x00--\nmore\n";
         assert_eq!(filter(input), input);
     }
+
+    #[test]
+    fn frame_iterator_grep_separator_between_frames() {
+        use freeswitch_sofia_trace_parser::FrameIterator;
+
+        let mut data = Vec::new();
+        data.extend_from_slice(
+            b"recv 5 bytes from tcp/1.1.1.1:5060 at 00:00:00.000000:\nhello\x0B\n",
+        );
+        data.extend_from_slice(
+            b"sent 5 bytes to tcp/1.1.1.1:5060 at 00:00:00.000001:\nworld\x0B\n",
+        );
+
+        let filtered = GrepFilter::new(&data[..]);
+        let frames: Vec<_> = FrameIterator::new(filtered)
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert_eq!(frames.len(), 2);
+        assert_eq!(frames[0].content, b"hello");
+        assert_eq!(frames[1].content, b"world");
+    }
+
+    #[test]
+    fn frame_iterator_grep_partial_context() {
+        use freeswitch_sofia_trace_parser::FrameIterator;
+
+        let mut data = Vec::new();
+        data.extend_from_slice(
+            b"recv 5 bytes from tcp/1.1.1.1:5060 at 00:00:00.000000:\nhello\x0B\n",
+        );
+        data.extend_from_slice(b"Accept: application/sdp\r\nContent-Length: 0\r\n\r\n");
+        data.extend_from_slice(b"\x0B\n");
+        data.extend_from_slice(b"sent 3 bytes to tcp/2.2.2.2:5060 at 00:00:01.000000:\nbye\x0B\n");
+
+        let filtered = GrepFilter::new(&data[..]);
+        let items: Vec<_> = FrameIterator::new(filtered).collect();
+        let frames: Vec<_> = items.into_iter().filter_map(Result::ok).collect();
+        assert_eq!(frames.len(), 2);
+        assert_eq!(frames[0].content, b"hello");
+        assert_eq!(frames[1].content, b"bye");
+    }
+
+    #[test]
+    fn frame_iterator_grep_separator_strips_from_content() {
+        use freeswitch_sofia_trace_parser::FrameIterator;
+
+        let content = b"SIP/2.0 200 OK\r\nVia: a\r\nContent-Length: 0\r\n\r\n";
+        let mut data = Vec::new();
+        let header = format!(
+            "recv {} bytes from tcp/1.1.1.1:5060 at 00:00:00.000000:\n",
+            content.len()
+        );
+        data.extend_from_slice(header.as_bytes());
+        data.extend_from_slice(b"SIP/2.0 200 OK\r\nVia: a\r\n--\nContent-Length: 0\r\n\r\n");
+        data.extend_from_slice(b"\x0B\n");
+
+        let filtered = GrepFilter::new(&data[..]);
+        let frames: Vec<_> = FrameIterator::new(filtered)
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert_eq!(frames.len(), 1);
+        assert_eq!(frames[0].content, content);
+    }
 }

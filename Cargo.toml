@@ -1,10 +1,14 @@
 [package]
 name = "freeswitch-sofia-trace-parser"
-version = "0.3.0"
+version = "0.4.0"
 edition = "2021"
 license = "LGPL-2.1-or-later"
 authors = ["Jérôme Poulin <jeromepoulin@gmail.com>"]
 description = "Parser for FreeSWITCH mod_sofia SIP trace dump files"
+repository = "https://github.com/ticpu/freeswitch-sofia-trace-parser"
+keywords = ["freeswitch", "sip", "parser", "voip", "sofia"]
+categories = ["parser-implementations", "network-programming"]
+autobins = false
 
 [lib]
 name = "freeswitch_sofia_trace_parser"
@@ -12,12 +16,17 @@ name = "freeswitch_sofia_trace_parser"
 [[bin]]
 name = "freeswitch-sofia-trace-parser"
 path = "src/bin/main.rs"
+required-features = ["cli"]
+
+[features]
+default = []
+cli = ["dep:clap", "dep:tracing-subscriber", "dep:regex", "dep:quoted_printable"]
 
 [dependencies]
 memchr = "2"
 tracing = "0.1"
-clap = { version = "4", features = ["derive"] }
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-regex = "1"
 serde_json = "1"
-quoted_printable = "0.5.1"
+clap = { version = "4", features = ["derive"], optional = true }
+tracing-subscriber = { version = "0.3", features = ["env-filter"], optional = true }
+regex = { version = "1", optional = true }
+quoted_printable = { version = "0.5.1", optional = true }

@@ -1,18 +1,39 @@
 #!/bin/bash
-# Pre-commit hook to check formatting and clippy
-
 set -e
+
+echo "Running gitleaks..."
+if ! gitleaks detect --no-banner; then
+    echo "gitleaks found secrets in repository."
+    exit 1
+fi
 
 echo "Running cargo fmt check..."
 if ! cargo fmt -- --check; then
-    echo "❌ Code is not formatted. Run 'cargo fmt' to fix."
+    echo "Code is not formatted. Run 'cargo fmt' to fix."
     exit 1
 fi
 
 echo "Running cargo clippy..."
-if ! cargo clippy --all-targets --message-format=short -- -D warnings; then
-    echo "❌ Clippy found warnings. Fix them before committing."
+if ! cargo clippy --features cli --all-targets --message-format=short -- -D warnings; then
+    echo "Clippy found warnings. Fix them before committing."
     exit 1
 fi
 
-echo "✅ Pre-commit checks passed"
+echo "Running tests..."
+if ! bash -c 'cargo test --lib --features cli --bin freeswitch-sofia-trace-parser 2>&1 | grep "^test result:"'; then
+    echo "Tests failed. Fix them before committing."
+    exit 1
+fi
+
+latest_tag=$(git describe --tags --abbrev=0 --match 'v*' 2>/dev/null || true)
+if [ -n "$latest_tag" ]; then
+    echo "Running cargo semver-checks against $latest_tag..."
+    if ! cargo semver-checks --baseline-rev "$latest_tag"; then
+        echo "Semver check failed. Bump the version if this is an intentional breaking change."
+        exit 1
+    fi
+else
+    echo "No version tag found, skipping semver-checks."
+fi
+
+echo "Pre-commit checks passed"

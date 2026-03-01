@@ -2,6 +2,15 @@
 
 Rust library and CLI for parsing FreeSWITCH `mod_sofia` SIP trace dump files.
 
+```sh
+cargo run --features cli -- [OPTIONS] [FILES...]
+```
+
+```toml
+[dependencies]
+freeswitch-sofia-trace-parser = "0"
+```
+
 ## Overview
 
 FreeSWITCH logs SIP traffic to dump files at

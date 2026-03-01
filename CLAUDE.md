@@ -5,12 +5,27 @@
 This is a **library-first** crate. `src/bin/main.rs` is a sample (but complete) CLI implementation.
 `Cargo.lock` is gitignored per Cargo convention for libraries.
 
+## Library Code Rules
+
+- **No `unwrap()`/`expect()`/`panic!()` in library code** outside of tests. Return
+  `Result` or `Option` instead.
+- **Binary-only dependencies must be feature-gated** behind the `cli` feature.
+  Library consumers (`default-features = false`) must not pull in CLI deps.
+- **CLI-only modules must not be `pub` in `lib.rs`.** Code used only by the binary
+  lives under `src/bin/` (e.g. `src/bin/grep.rs`), not in the library.
+- **No `pub mod` names that shadow `std`** (e.g. don't name a module `fmt`, `io`,
+  `collections`).
+- **Never expose dependency types in public signatures.** A dependency major-version
+  bump becomes a semver break if its types leak into the public API.
+
 ## Build & Test Workflow
 
-**Always run `cargo fmt` before every commit.** The pre-commit hook enforces formatting.
+**Always run `cargo fmt` before every commit.** The pre-commit hook enforces
+formatting, clippy, gitleaks, tests, and semver-checks.
 
 ```sh
 cargo fmt
+cargo check --no-default-features --message-format=short  # lib only
 cargo check --message-format=short
 cargo clippy --fix --allow-dirty --message-format=short
 cargo test --lib                    # unit tests (fast, no sample files needed)
@@ -24,6 +39,7 @@ cargo test --test level3_samples    # Level 3 integration tests (requires sample
 Before tagging a release:
 
 ```sh
+cargo semver-checks --baseline-rev <previous-tag> --default-features=false
 cargo clippy --release -- -D warnings
 cargo test --release
 cargo build --release
@@ -38,6 +54,13 @@ git tag -as v0.X.0 -m "v0.X.0
 - Another change"
 git push --tags
 ```
+
+**Never `cargo publish` without completing these steps first:**
+
+1. Create a signed annotated tag (`git tag -as`)
+2. Push the tag (`git push --tags`)
+3. Wait for CI to pass on the tagged commit
+4. Only then `cargo publish`
 
 ## Test Architecture
 
