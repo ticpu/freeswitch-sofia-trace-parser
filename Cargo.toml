@@ -32,4 +32,5 @@ regex = { version = "1", optional = true }
 quoted_printable = { version = "0.5.1", optional = true }
 
 [dev-dependencies]
+rayon = "1"
 sip-uri = { path = "../sip-uri" }
