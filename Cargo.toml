@@ -30,3 +30,6 @@ clap = { version = "4", features = ["derive"], optional = true }
 tracing-subscriber = { version = "0.3", features = ["env-filter"], optional = true }
 regex = { version = "1", optional = true }
 quoted_printable = { version = "0.5.1", optional = true }
+
+[dev-dependencies]
+sip-uri = { path = "../sip-uri" }
