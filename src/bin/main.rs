@@ -1,5 +1,3 @@
-mod grep;
-
 use std::collections::HashMap;
 use std::fs::File;
 use std::io::{self, Read};
@@ -11,10 +9,9 @@ use tracing::{debug, warn};
 
 use freeswitch_sofia_trace_parser::types::{Direction, SipMessageType};
 use freeswitch_sofia_trace_parser::{
-    FrameIterator, MessageIterator, ParseError, ParseStats, ParsedMessageIterator,
+    FrameIterator, GrepFilter, MessageIterator, ParseError, ParseStats, ParsedMessageIterator,
     ParsedSipMessage, SipMessage,
 };
-use grep::GrepFilter;
 
 enum OutputMode {
     Summary,

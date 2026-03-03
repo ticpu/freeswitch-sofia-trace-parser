@@ -125,7 +125,7 @@ mod tests {
 
     #[test]
     fn frame_iterator_grep_separator_between_frames() {
-        use freeswitch_sofia_trace_parser::FrameIterator;
+        use crate::FrameIterator;
 
         let mut data = Vec::new();
         data.extend_from_slice(
@@ -146,7 +146,7 @@ mod tests {
 
     #[test]
     fn frame_iterator_grep_partial_context() {
-        use freeswitch_sofia_trace_parser::FrameIterator;
+        use crate::FrameIterator;
 
         let mut data = Vec::new();
         data.extend_from_slice(
@@ -166,7 +166,7 @@ mod tests {
 
     #[test]
     fn frame_iterator_grep_separator_strips_from_content() {
-        use freeswitch_sofia_trace_parser::FrameIterator;
+        use crate::FrameIterator;
 
         let content = b"SIP/2.0 200 OK\r\nVia: a\r\nContent-Length: 0\r\n\r\n";
         let mut data = Vec::new();
