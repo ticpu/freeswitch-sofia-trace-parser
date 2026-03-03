@@ -1,3 +1,5 @@
+#![cfg(feature = "torture-test")]
+
 use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
