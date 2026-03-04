@@ -457,6 +457,10 @@ impl<R: Read> Iterator for FrameIterator<R> {
                     None => {
                         if self.eof {
                             debug!("no valid frame header found in entire input");
+                            let remaining = self.buf.len();
+                            if remaining > 0 {
+                                self.consume_skipped(remaining, SkipReason::InvalidHeader);
+                            }
                             return None;
                         }
                         if let Err(e) = self.fill_buf() {
@@ -499,6 +503,10 @@ impl<R: Read> Iterator for FrameIterator<R> {
                 Err(ParseError::InvalidHeader(ref msg)) if msg == "no newline in header" => {
                     if self.eof {
                         debug!("truncated frame header at EOF");
+                        let remaining = self.buf.len();
+                        if remaining > 0 {
+                            self.consume_skipped(remaining, SkipReason::InvalidHeader);
+                        }
                         return None;
                     }
                     if let Err(e) = self.fill_buf() {

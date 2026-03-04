@@ -494,11 +494,8 @@ fn run_stats(
     }
 
     if stats.bytes_read > 0 {
-        let parsed_pct = if stats.bytes_read > 0 {
-            ((stats.bytes_read - stats.bytes_skipped) as f64 / stats.bytes_read as f64) * 100.0
-        } else {
-            100.0
-        };
+        let parsed_pct =
+            ((stats.bytes_read - stats.bytes_skipped) as f64 / stats.bytes_read as f64) * 100.0;
         println!("\ninput:");
         println!("  bytes: {}", stats.bytes_read);
         println!(
