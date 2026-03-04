@@ -13,15 +13,27 @@ const SENT_PREFIX: &[u8] = b"sent ";
 /// Based on IP max datagram size (65535) plus the `\x0B\n` boundary (2 bytes).
 const MAX_PARTIAL_FRAME: usize = 65537;
 
+/// Errors produced during frame parsing (Level 1) and SIP parsing (Level 3).
+///
+/// Returned as `Iterator::Item = Result<T, ParseError>`. The caller decides
+/// whether to skip, log, or fail on each error.
 #[derive(Debug)]
 pub enum ParseError {
+    /// Frame header is malformed (e.g., missing colon, bad timestamp).
     InvalidHeader(String),
+    /// Reassembled content is not a valid SIP message.
     InvalidMessage(String),
+    /// Whitespace-only content from TLS/TCP keep-alive probes (RFC 5626).
+    /// Not a parse failure; can be safely ignored.
     TransportNoise {
+        /// Number of whitespace bytes.
         bytes: usize,
+        /// Transport of the connection that produced the noise.
         transport: Transport,
+        /// Remote address of the connection.
         address: String,
     },
+    /// Underlying reader returned an I/O error.
     Io(std::io::Error),
 }
 
@@ -274,6 +286,25 @@ pub fn is_frame_header(data: &[u8]) -> bool {
 
 const READ_BUF_SIZE: usize = 32 * 1024;
 
+/// Level 1 streaming parser: splits raw dump bytes into [`Frame`]s.
+///
+/// Reads from any [`Read`] source and yields frames delimited by `\x0B\n`
+/// boundaries. Handles truncated first/last frames, file concatenation,
+/// and garbage recovery.
+///
+/// # Example
+///
+/// ```no_run
+/// use std::fs::File;
+/// use freeswitch_sofia_trace_parser::FrameIterator;
+///
+/// let file = File::open("profile.dump").unwrap();
+/// for frame in FrameIterator::new(file) {
+///     let frame = frame.unwrap();
+///     println!("{} {} bytes {} {}",
+///         frame.timestamp, frame.byte_count, frame.direction, frame.address);
+/// }
+/// ```
 pub struct FrameIterator<R> {
     reader: R,
     buf: Vec<u8>,
@@ -285,6 +316,7 @@ pub struct FrameIterator<R> {
 }
 
 impl<R: Read> FrameIterator<R> {
+    /// Create a new frame iterator reading from the given source.
     pub fn new(reader: R) -> Self {
         FrameIterator {
             reader,
@@ -297,6 +329,8 @@ impl<R: Read> FrameIterator<R> {
         }
     }
 
+    /// Enable capturing of skipped bytes (shorthand for
+    /// [`SkipTracking::CaptureData`]).
     pub fn capture_skipped(mut self, enable: bool) -> Self {
         if enable {
             self.skip_tracking = SkipTracking::CaptureData;
@@ -304,19 +338,23 @@ impl<R: Read> FrameIterator<R> {
         self
     }
 
+    /// Set the level of detail for unparsed region tracking.
     pub fn skip_tracking(mut self, tracking: SkipTracking) -> Self {
         self.skip_tracking = tracking;
         self
     }
 
+    /// Borrow the accumulated parse statistics.
     pub fn stats(&self) -> &ParseStats {
         &self.stats
     }
 
+    /// Mutably borrow the parse statistics.
     pub fn stats_mut(&mut self) -> &mut ParseStats {
         &mut self.stats
     }
 
+    /// Take all accumulated unparsed regions, leaving the list empty.
     pub fn drain_unparsed(&mut self) -> Vec<UnparsedRegion> {
         self.stats.drain_regions()
     }

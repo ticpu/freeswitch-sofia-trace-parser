@@ -1,6 +1,6 @@
 [package]
 name = "freeswitch-sofia-trace-parser"
-version = "0.5.0"
+version = "0.5.1"
 edition = "2021"
 license = "LGPL-2.1-or-later"
 authors = ["Jérôme Poulin <jeromepoulin@gmail.com>"]
@@ -8,6 +8,7 @@ description = "Parser for FreeSWITCH mod_sofia SIP trace dump files"
 repository = "https://github.com/ticpu/freeswitch-sofia-trace-parser"
 keywords = ["freeswitch", "sip", "parser", "voip", "sofia"]
 categories = ["parser-implementations", "network-programming"]
+documentation = "https://docs.rs/freeswitch-sofia-trace-parser"
 autobins = false
 
 [lib]

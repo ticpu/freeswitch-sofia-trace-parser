@@ -19,6 +19,28 @@ static CRLFCRLF: LazyLock<memmem::Finder<'static>> =
 /// multi-day dump file streams with ephemeral TLS source ports.
 const STALE_TIMEOUT_SECS: u64 = 7200;
 
+/// Level 2 streaming parser: reassembles TCP segments into complete SIP messages.
+///
+/// Wraps a [`FrameIterator`] and groups TCP frames by `(Direction, Address)`.
+/// Messages are emitted when headers and Content-Length body bytes are fully
+/// available. UDP frames pass through as-is (1:1 mapping).
+///
+/// Stale TCP connection buffers are evicted after 2 hours of inactivity to
+/// maintain constant memory on multi-day dump streams.
+///
+/// # Example
+///
+/// ```no_run
+/// use std::fs::File;
+/// use freeswitch_sofia_trace_parser::MessageIterator;
+///
+/// let file = File::open("profile.dump").unwrap();
+/// for msg in MessageIterator::new(file) {
+///     let msg = msg.unwrap();
+///     println!("{} {} {} ({} frames)",
+///         msg.timestamp, msg.direction, msg.address, msg.frame_count);
+/// }
+/// ```
 pub struct MessageIterator<R> {
     frames: FrameIterator<R>,
     buffers: HashMap<(Direction, String), ConnectionBuffer>,
@@ -39,6 +61,7 @@ struct ConnectionBuffer {
 }
 
 impl<R: std::io::Read> MessageIterator<R> {
+    /// Create a new message iterator reading from the given source.
     pub fn new(reader: R) -> Self {
         MessageIterator {
             frames: FrameIterator::new(reader),
@@ -51,24 +74,29 @@ impl<R: std::io::Read> MessageIterator<R> {
         }
     }
 
+    /// Enable capturing of skipped bytes in the underlying [`FrameIterator`].
     pub fn capture_skipped(mut self, enable: bool) -> Self {
         self.frames = self.frames.capture_skipped(enable);
         self
     }
 
+    /// Set the level of detail for unparsed region tracking.
     pub fn skip_tracking(mut self, tracking: SkipTracking) -> Self {
         self.frames = self.frames.skip_tracking(tracking);
         self
     }
 
+    /// Borrow the accumulated parse statistics from the underlying frame parser.
     pub fn parse_stats(&self) -> &ParseStats {
         self.frames.stats()
     }
 
+    /// Mutably borrow the parse statistics.
     pub fn parse_stats_mut(&mut self) -> &mut ParseStats {
         self.frames.stats_mut()
     }
 
+    /// Take all accumulated unparsed regions, leaving the list empty.
     pub fn drain_unparsed(&mut self) -> Vec<UnparsedRegion> {
         self.frames.drain_unparsed()
     }

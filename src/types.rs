@@ -1,13 +1,26 @@
 use std::borrow::Cow;
 use std::fmt;
 
+/// Why a region of the input stream was not parsed into a frame.
+///
+/// Every byte in the input is either parsed or classified with one of these
+/// reasons, enabling byte-level coverage accounting via [`ParseStats`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SkipReason {
+    /// Truncated frame at the start of a file, typically from logrotate
+    /// cutting mid-write. Capped at 65,535 bytes.
     PartialFirstFrame,
+    /// Skip region exceeds 65,535 bytes at file start, indicating the input
+    /// is not a dump file (e.g., compressed or binary data).
     OversizedFrame,
+    /// Unrecoverable bytes skipped between valid frames mid-stream.
     MidStreamSkip,
+    /// Logrotate wrote a partial frame tail at the start of the new file.
+    /// Detected by the `\r\n\r\n\x0B\n` suffix pattern.
     ReplayedFrame,
+    /// Frame at EOF with fewer content bytes than declared in the header.
     IncompleteFrame,
+    /// Data starts with `recv`/`sent` but fails frame header parsing.
     InvalidHeader,
 }
 
@@ -24,37 +37,62 @@ impl fmt::Display for SkipReason {
     }
 }
 
+/// Controls how much detail the parser records about unparsed regions.
+///
+/// Defaults to `CountOnly` for constant-memory operation. Higher levels
+/// allocate per-region and should only be enabled for diagnostics.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SkipTracking {
+    /// Track only `bytes_read` and `bytes_skipped` counters. No allocation.
     CountOnly,
+    /// Record offset, length, and reason for each unparsed region.
     TrackRegions,
+    /// Like `TrackRegions`, but also capture the skipped bytes themselves.
     CaptureData,
 }
 
+/// A contiguous region of the input that was not parsed into a frame.
 #[derive(Debug, Clone)]
 pub struct UnparsedRegion {
+    /// Byte offset from the start of the input stream.
     pub offset: u64,
+    /// Number of bytes in this region.
     pub length: u64,
+    /// Why this region was skipped.
     pub reason: SkipReason,
+    /// The raw bytes, populated only when [`SkipTracking::CaptureData`] is enabled.
     pub data: Option<Vec<u8>>,
 }
 
+/// Byte-level parse coverage statistics.
+///
+/// Available from all three iterator levels via `stats()` or `parse_stats()`.
+/// Every byte consumed from the reader is accounted for as either parsed
+/// (`bytes_read - bytes_skipped`) or skipped (`bytes_skipped`).
 #[derive(Debug, Default, Clone)]
 pub struct ParseStats {
+    /// Total bytes consumed from the reader.
     pub bytes_read: u64,
+    /// Bytes that were skipped (not parsed into frames).
     pub bytes_skipped: u64,
+    /// Detailed unparsed region records. Only populated when
+    /// [`SkipTracking`] is `TrackRegions` or `CaptureData`.
     pub unparsed_regions: Vec<UnparsedRegion>,
 }
 
 impl ParseStats {
+    /// Take all accumulated unparsed regions, leaving the list empty.
     pub fn drain_regions(&mut self) -> Vec<UnparsedRegion> {
         std::mem::take(&mut self.unparsed_regions)
     }
 }
 
+/// Whether a frame was received or sent by FreeSWITCH.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Direction {
+    /// Received from the network.
     Recv,
+    /// Sent to the network.
     Sent,
 }
 
@@ -68,6 +106,7 @@ impl fmt::Display for Direction {
 }
 
 impl Direction {
+    /// Returns `"from"` for `Recv`, `"to"` for `Sent`.
     pub fn preposition(&self) -> &'static str {
         match self {
             Direction::Recv => "from",
@@ -76,11 +115,16 @@ impl Direction {
     }
 }
 
+/// SIP transport protocol as reported in the frame header.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Transport {
+    /// Transmission Control Protocol.
     Tcp,
+    /// User Datagram Protocol.
     Udp,
+    /// Transport Layer Security.
     Tls,
+    /// WebSocket Secure (RFC 7118).
     Wss,
 }
 
@@ -95,26 +139,44 @@ impl fmt::Display for Transport {
     }
 }
 
+/// Frame timestamp, either time-only or full date+time.
+///
+/// Older FreeSWITCH versions write `HH:MM:SS.usec`, newer versions write
+/// `YYYY-MM-DD HH:MM:SS.usec`. Both formats are supported.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Timestamp {
+    /// `HH:MM:SS.usec` — no date component.
     TimeOnly {
+        /// Hour (0-23).
         hour: u8,
+        /// Minute (0-59).
         min: u8,
+        /// Second (0-59).
         sec: u8,
+        /// Microseconds (0-999999).
         usec: u32,
     },
+    /// `YYYY-MM-DD HH:MM:SS.usec` — full date and time.
     DateTime {
+        /// Year.
         year: u16,
+        /// Month (1-12).
         month: u8,
+        /// Day (1-31).
         day: u8,
+        /// Hour (0-23).
         hour: u8,
+        /// Minute (0-59).
         min: u8,
+        /// Second (0-59).
         sec: u8,
+        /// Microseconds (0-999999).
         usec: u32,
     },
 }
 
 impl Timestamp {
+    /// Seconds since midnight, ignoring microseconds.
     pub fn time_of_day_secs(&self) -> u32 {
         let (h, m, s) = match self {
             Timestamp::TimeOnly { hour, min, sec, .. } => (*hour, *min, *sec),
@@ -123,6 +185,8 @@ impl Timestamp {
         h as u32 * 3600 + m as u32 * 60 + s as u32
     }
 
+    /// Tuple suitable for chronological ordering.
+    /// `TimeOnly` timestamps sort before any `DateTime` (year/month/day = 0).
     pub fn sort_key(&self) -> (u16, u8, u8, u8, u8, u8, u32) {
         match self {
             Timestamp::TimeOnly {
@@ -169,30 +233,64 @@ impl fmt::Display for Timestamp {
     }
 }
 
+/// A single frame from the dump file (Level 1 output).
+///
+/// Each frame corresponds to one `send()` or `recv()` call logged by
+/// `mod_sofia`. The `byte_count` field is the value FreeSWITCH wrote in the
+/// header; `content` is the actual payload between boundaries.
 #[derive(Debug, Clone)]
 pub struct Frame {
+    /// Whether this frame was received or sent.
     pub direction: Direction,
+    /// Byte count declared in the frame header.
     pub byte_count: usize,
+    /// Transport protocol.
     pub transport: Transport,
+    /// Remote address as `ip:port` (e.g., `"10.0.0.1:5060"`).
     pub address: String,
+    /// When this frame was logged.
     pub timestamp: Timestamp,
+    /// Raw frame payload.
     pub content: Vec<u8>,
 }
 
+/// A reassembled SIP message (Level 2 output).
+///
+/// For TCP, consecutive frames from the same connection are concatenated and
+/// split by Content-Length. For UDP, each frame becomes one message (1:1).
 #[derive(Debug, Clone)]
 pub struct SipMessage {
+    /// Whether this message was received or sent.
     pub direction: Direction,
+    /// Transport protocol.
     pub transport: Transport,
+    /// Remote address as `ip:port`.
     pub address: String,
+    /// Timestamp of the first frame in this message.
     pub timestamp: Timestamp,
+    /// Reassembled message bytes (headers + body).
     pub content: Vec<u8>,
+    /// Number of Level 1 frames that were reassembled into this message.
     pub frame_count: usize,
 }
 
+/// SIP request or response first line.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SipMessageType {
-    Request { method: String, uri: String },
-    Response { code: u16, reason: String },
+    /// `METHOD uri SIP/2.0`
+    Request {
+        /// SIP method (e.g., `"INVITE"`, `"BYE"`).
+        method: String,
+        /// Request URI.
+        uri: String,
+    },
+    /// `SIP/2.0 code reason`
+    Response {
+        /// Status code (e.g., 200, 404).
+        code: u16,
+        /// Reason phrase (e.g., `"OK"`, `"Not Found"`).
+        reason: String,
+    },
 }
 
 impl fmt::Display for SipMessageType {
@@ -205,6 +303,7 @@ impl fmt::Display for SipMessageType {
 }
 
 impl SipMessageType {
+    /// Short description: the method name for requests, `"code reason"` for responses.
     pub fn summary(&self) -> Cow<'_, str> {
         match self {
             SipMessageType::Request { method, .. } => Cow::Borrowed(method),
@@ -213,25 +312,44 @@ impl SipMessageType {
     }
 }
 
+/// A fully parsed SIP message (Level 3 output).
+///
+/// Provides typed access to the request/response line, headers, and body.
+/// For JSON content types, [`body_text()`](Self::body_text) unescapes RFC 8259
+/// string sequences. For multipart bodies, [`body_parts()`](Self::body_parts)
+/// splits into individual MIME parts.
 #[derive(Debug, Clone)]
 pub struct ParsedSipMessage {
+    /// Whether this message was received or sent.
     pub direction: Direction,
+    /// Transport protocol.
     pub transport: Transport,
+    /// Remote address as `ip:port`.
     pub address: String,
+    /// When this message was logged.
     pub timestamp: Timestamp,
+    /// Parsed request or response first line.
     pub message_type: SipMessageType,
+    /// Headers in wire order as `(name, value)` pairs. Names preserve
+    /// original casing; lookups are case-insensitive.
     pub headers: Vec<(String, String)>,
+    /// Raw body bytes after the `\r\n\r\n` header terminator.
     pub body: Vec<u8>,
+    /// Number of Level 1 frames that were reassembled into this message.
     pub frame_count: usize,
 }
 
+/// A single part from a multipart MIME body.
 #[derive(Debug, Clone)]
 pub struct MimePart {
+    /// MIME part headers (e.g., Content-Type, Content-ID).
     pub headers: Vec<(String, String)>,
+    /// Part body bytes.
     pub body: Vec<u8>,
 }
 
 impl MimePart {
+    /// Returns the Content-Type header value, if present.
     pub fn content_type(&self) -> Option<&str> {
         self.headers
             .iter()
@@ -247,36 +365,47 @@ impl MimePart {
             .map(|(_, v)| v.as_str())
     }
 
+    /// Returns the Content-ID header value, if present.
     pub fn content_id(&self) -> Option<&str> {
         self.header_value("Content-ID")
     }
 
+    /// Returns the Content-Disposition header value, if present.
     pub fn content_disposition(&self) -> Option<&str> {
         self.header_value("Content-Disposition")
     }
 }
 
 impl ParsedSipMessage {
+    /// Returns the Call-ID header value. Checks both `Call-ID` and
+    /// the compact form `i`.
     pub fn call_id(&self) -> Option<&str> {
         self.header_value("Call-ID")
             .or_else(|| self.header_value("i"))
     }
 
+    /// Returns the Content-Type header value. Checks both `Content-Type` and
+    /// the compact form `c`.
     pub fn content_type(&self) -> Option<&str> {
         self.header_value("Content-Type")
             .or_else(|| self.header_value("c"))
     }
 
+    /// Returns the Content-Length header value as `usize`. Checks both
+    /// `Content-Length` and the compact form `l`.
     pub fn content_length(&self) -> Option<usize> {
         self.header_value("Content-Length")
             .or_else(|| self.header_value("l"))
             .and_then(|v| v.trim().parse().ok())
     }
 
+    /// Returns the CSeq header value (e.g., `"1 INVITE"`).
     pub fn cseq(&self) -> Option<&str> {
         self.header_value("CSeq")
     }
 
+    /// Returns the SIP method: from the request line for requests,
+    /// or from the CSeq header for responses.
     pub fn method(&self) -> Option<&str> {
         match &self.message_type {
             SipMessageType::Request { method, .. } => Some(method),
@@ -286,10 +415,13 @@ impl ParsedSipMessage {
         }
     }
 
+    /// Raw body bytes interpreted as UTF-8 (lossy). No processing is applied
+    /// regardless of Content-Type.
     pub fn body_data(&self) -> Cow<'_, str> {
         String::from_utf8_lossy(&self.body)
     }
 
+    /// Reconstruct the SIP message as wire-format bytes (first line + headers + body).
     pub fn to_bytes(&self) -> Vec<u8> {
         let mut out = Vec::new();
         match &self.message_type {

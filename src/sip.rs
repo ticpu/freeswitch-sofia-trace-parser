@@ -15,40 +15,68 @@ static CRLFCRLF: LazyLock<memmem::Finder<'static>> =
     LazyLock::new(|| memmem::Finder::new(b"\r\n\r\n"));
 
 impl SipMessage {
+    /// Parse this reassembled message into a [`ParsedSipMessage`] with typed
+    /// access to the request/status line, headers, and body.
     pub fn parse(&self) -> Result<ParsedSipMessage, ParseError> {
         parse_sip_message(self)
     }
 }
 
+/// Level 3 streaming parser: wraps [`MessageIterator`] and parses each
+/// reassembled message into a [`ParsedSipMessage`].
+///
+/// # Example
+///
+/// ```no_run
+/// use std::fs::File;
+/// use freeswitch_sofia_trace_parser::ParsedMessageIterator;
+///
+/// let file = File::open("profile.dump").unwrap();
+/// for result in ParsedMessageIterator::new(file) {
+///     let msg = result.unwrap();
+///     if let Some(parts) = msg.body_parts() {
+///         for part in &parts {
+///             println!("  {} ({} bytes)",
+///                 part.content_type().unwrap_or("unknown"), part.body.len());
+///         }
+///     }
+/// }
+/// ```
 pub struct ParsedMessageIterator<R> {
     inner: MessageIterator<R>,
 }
 
 impl<R: std::io::Read> ParsedMessageIterator<R> {
+    /// Create a new parsed message iterator reading from the given source.
     pub fn new(reader: R) -> Self {
         ParsedMessageIterator {
             inner: MessageIterator::new(reader),
         }
     }
 
+    /// Enable capturing of skipped bytes in the underlying frame parser.
     pub fn capture_skipped(mut self, enable: bool) -> Self {
         self.inner = self.inner.capture_skipped(enable);
         self
     }
 
+    /// Set the level of detail for unparsed region tracking.
     pub fn skip_tracking(mut self, tracking: SkipTracking) -> Self {
         self.inner = self.inner.skip_tracking(tracking);
         self
     }
 
+    /// Borrow the accumulated parse statistics.
     pub fn parse_stats(&self) -> &ParseStats {
         self.inner.parse_stats()
     }
 
+    /// Mutably borrow the parse statistics.
     pub fn parse_stats_mut(&mut self) -> &mut ParseStats {
         self.inner.parse_stats_mut()
     }
 
+    /// Take all accumulated unparsed regions, leaving the list empty.
     pub fn drain_unparsed(&mut self) -> Vec<UnparsedRegion> {
         self.inner.drain_unparsed()
     }
@@ -279,22 +307,30 @@ fn trim_header_value(b: &[u8]) -> &[u8] {
 }
 
 impl ParsedSipMessage {
+    /// Returns `true` if the Content-Type starts with `multipart/`.
     pub fn is_multipart(&self) -> bool {
         self.content_type()
             .map(|ct| ct.to_ascii_lowercase().starts_with("multipart/"))
             .unwrap_or(false)
     }
 
+    /// Extract the MIME boundary string from the Content-Type header.
     pub fn multipart_boundary(&self) -> Option<&str> {
         let ct = self.content_type()?;
         extract_boundary(ct)
     }
 
+    /// Split a multipart body into individual [`MimePart`]s.
+    /// Returns `None` if the message is not multipart.
     pub fn body_parts(&self) -> Option<Vec<MimePart>> {
         let boundary = self.multipart_boundary()?;
         Some(parse_multipart_body(&self.body, boundary))
     }
 
+    /// Content-type-aware body text. For JSON content types (`application/json`
+    /// and `application/*+json`), unescapes RFC 8259 string sequences
+    /// (`\r\n` to CRLF, `\t` to tab, `\uXXXX` to Unicode). Passthrough for
+    /// all other content types.
     pub fn body_text(&self) -> Cow<'_, str> {
         if let Some(ct) = self.content_type() {
             if is_json_content_type(ct) {
@@ -304,6 +340,9 @@ impl ParsedSipMessage {
         self.body_data()
     }
 
+    /// Parse the body as JSON and return the unescaped string value of a
+    /// top-level key. Returns `None` if the content type is not JSON, the
+    /// body is invalid JSON, the key is missing, or the value is not a string.
     pub fn json_field(&self, key: &str) -> Option<String> {
         let ct = self.content_type()?;
         if !is_json_content_type(ct) {

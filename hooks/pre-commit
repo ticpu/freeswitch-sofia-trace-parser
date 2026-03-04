@@ -19,6 +19,13 @@ if ! cargo clippy --features cli --all-targets --message-format=short -- -D warn
     exit 1
 fi
 
+echo "Checking documentation coverage..."
+if ! doc_output=$(RUSTDOCFLAGS="-D missing_docs -D rustdoc::broken_intra_doc_links" cargo doc --no-deps 2>&1); then
+    echo "$doc_output" | grep '^error' | head -20
+    echo "Documentation errors. Run: RUSTDOCFLAGS='-D missing_docs -D rustdoc::broken_intra_doc_links' cargo doc --no-deps"
+    exit 1
+fi
+
 echo "Running tests..."
 if ! bash -c 'cargo test --lib --features cli --bin freeswitch-sofia-trace-parser 2>&1 | grep "^test result:"'; then
     echo "Tests failed. Fix them before committing."

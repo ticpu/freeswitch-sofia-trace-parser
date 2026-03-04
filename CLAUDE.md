@@ -129,6 +129,9 @@ assuming malformed data and adding workarounds.
 
 ## Key Design Decisions
 
+See [`docs/design-rationale.md`](docs/design-rationale.md) for the full
+engineering rationale. Summary of the major decisions:
+
 ### Boundary detection: byte_count-first strategy
 
 The `\x0B\n` boundary is validated two ways:

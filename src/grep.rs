@@ -1,5 +1,14 @@
 use std::io::{BufRead, BufReader, Read};
 
+/// A [`Read`] adapter that strips `grep -C` separator lines (`--\n`) from the
+/// input stream.
+///
+/// When piping grep output into the parser (`grep -C5 pattern dump | parser`),
+/// grep inserts `--` lines between match groups. These corrupt the binary frame
+/// stream. Wrap the input in `GrepFilter` to transparently remove them.
+///
+/// Only exact `--\n` and `--\r\n` lines are stripped. Similar lines like
+/// `---\n` or `-- \n` pass through unchanged.
 pub struct GrepFilter<R> {
     inner: BufReader<R>,
     buf: Vec<u8>,
@@ -7,6 +16,7 @@ pub struct GrepFilter<R> {
 }
 
 impl<R: Read> GrepFilter<R> {
+    /// Create a new filter wrapping the given reader.
     pub fn new(reader: R) -> Self {
         Self {
             inner: BufReader::new(reader),
