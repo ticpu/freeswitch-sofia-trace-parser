@@ -206,19 +206,19 @@ impl<R: std::io::Read> Iterator for MessageIterator<R> {
                         self.last_sweep_abs_secs = current_abs;
                     }
 
-                    let key = (frame.direction, frame.address.clone());
+                    let key = (frame.direction, frame.address);
 
-                    let buf = self
-                        .buffers
-                        .entry(key.clone())
-                        .or_insert_with(|| ConnectionBuffer {
+                    let buf = match self.buffers.get_mut(&key) {
+                        Some(buf) => buf,
+                        None => self.buffers.entry(key.clone()).or_insert(ConnectionBuffer {
                             transport: frame.transport,
                             timestamp: frame.timestamp,
                             content: Vec::new(),
                             frame_count: 0,
                             last_seen_day: self.current_day,
                             last_seen_time_secs: time_secs,
-                        });
+                        }),
+                    };
 
                     buf.last_seen_day = self.current_day;
                     buf.last_seen_time_secs = time_secs;
