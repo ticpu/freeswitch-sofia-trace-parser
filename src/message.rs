@@ -328,7 +328,8 @@ fn extract_complete(buf: &mut ConnectionBuffer, key: &(Direction, String)) -> Ve
             None => body_start, // No CL = no body (RFC 3261 Section 18.3)
         };
 
-        let msg_content: Vec<u8> = buf.content.drain(..msg_end).collect();
+        let remaining = buf.content.split_off(msg_end);
+        let msg_content = std::mem::replace(&mut buf.content, remaining);
 
         // Skip trailing CRLF between messages
         while buf.content.len() >= 2 && buf.content[0] == b'\r' && buf.content[1] == b'\n' {
