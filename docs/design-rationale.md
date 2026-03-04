@@ -301,3 +301,48 @@ Recovery from genuine invalid headers scans forward to the next
 `\x0B\n` + valid header pattern and returns `Some(Err(...))` so the
 caller sees the error. The library never silently swallows parse
 failures.
+
+## Why Per-File Throughput Matters
+
+The downstream `freeswitch-sip-trace-analyzer` processes 700MB–2GB of
+xz-compressed dump data per call investigation query. Even after
+parallelizing across files with `spawn_blocking`, per-file parse time
+dominates wall-clock: a single 340MB TCP dump takes ~3 seconds, and a
+worst-case query across 6 files and 2 profiles takes ~41 seconds.
+These queries happen during live NG-911 incident investigation where
+operators are reconstructing call flows, so parsing latency directly
+delays answers.
+
+Perf profiling confirmed the bottleneck is CPU-bound — parsing, UTF-8
+validation, and allocation — not I/O. The optimizations below target
+the hot paths identified in profiling production dump files.
+
+### ASCII Fast Path for String Conversion
+
+SIP is a text protocol. Every header name, value, method, URI, and
+status line this parser extracts is pure ASCII in production dumps.
+The original `bytes_to_string` ran the full UTF-8 state machine on
+every string, accounting for ~13% of CPU time between `from_utf8` and
+the lossy fallback. Since ASCII is a strict subset of UTF-8, an
+`is_ascii()` check (SIMD-accelerated on x86_64) lets us skip
+validation entirely for the common case. Non-ASCII content falls back
+to a single `from_utf8_lossy` pass.
+
+### GrepFilter Zero-Copy Path
+
+`GrepFilter` wraps all CLI input unconditionally, even when not piping
+from grep. The original `read_until` implementation copied every byte
+through an intermediate Vec: source → BufReader → GrepFilter.buf →
+caller. Switching to `fill_buf()` lets non-separator content flow
+directly from BufReader's internal buffer to the caller. The
+intermediate Vec only appears when a line straddles a buffer boundary.
+This eliminated ~8% of wall-clock time on a 340MB dump file.
+
+### Why Not FxHashMap
+
+`rustc-hash::FxHashMap` was benchmarked for the per-connection TCP
+reassembly buffer map. Despite FxHash being faster than SipHash per
+lookup, it was consistently slower end-to-end. The buffer map has very
+few live entries — buffers are eagerly removed after extraction — so
+the HashMap overhead is negligible and the additional dependency cost
+more than it saved.
