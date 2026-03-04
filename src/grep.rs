@@ -11,8 +11,10 @@ use std::io::{BufRead, BufReader, Read};
 /// `---\n` or `-- \n` pass through unchanged.
 pub struct GrepFilter<R> {
     inner: BufReader<R>,
-    buf: Vec<u8>,
-    pos: usize,
+    /// Accumulates a partial line when `--\n` / `--\r\n` detection straddles
+    /// a BufReader buffer boundary.
+    partial: Vec<u8>,
+    partial_pos: usize,
 }
 
 impl<R: Read> GrepFilter<R> {
@@ -20,8 +22,8 @@ impl<R: Read> GrepFilter<R> {
     pub fn new(reader: R) -> Self {
         Self {
             inner: BufReader::new(reader),
-            buf: Vec::new(),
-            pos: 0,
+            partial: Vec::new(),
+            partial_pos: 0,
         }
     }
 }
@@ -31,41 +33,56 @@ fn is_grep_separator(line: &[u8]) -> bool {
 }
 
 impl<R: Read> Read for GrepFilter<R> {
-    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
-        if self.pos < self.buf.len() {
-            let available = &self.buf[self.pos..];
-            let n = buf.len().min(available.len());
-            buf[..n].copy_from_slice(&available[..n]);
-            self.pos += n;
-            if self.pos == self.buf.len() {
-                self.buf.clear();
-                self.pos = 0;
+    fn read(&mut self, out: &mut [u8]) -> std::io::Result<usize> {
+        // Drain leftover partial line from a previous call
+        if self.partial_pos < self.partial.len() {
+            let available = &self.partial[self.partial_pos..];
+            let n = out.len().min(available.len());
+            out[..n].copy_from_slice(&available[..n]);
+            self.partial_pos += n;
+            if self.partial_pos == self.partial.len() {
+                self.partial.clear();
+                self.partial_pos = 0;
             }
             return Ok(n);
         }
 
-        self.buf.clear();
-        self.pos = 0;
-
-        while self.buf.len() < buf.len() {
-            let old_len = self.buf.len();
-            let n = self.inner.read_until(b'\n', &mut self.buf)?;
-            if n == 0 {
-                break;
+        loop {
+            let buf = self.inner.fill_buf()?;
+            if buf.is_empty() {
+                return Ok(0);
             }
-            if is_grep_separator(&self.buf[old_len..]) {
-                self.buf.truncate(old_len);
+
+            match memchr::memchr(b'\n', buf) {
+                Some(nl) => {
+                    let line_len = nl + 1;
+                    if is_grep_separator(&buf[..line_len]) {
+                        self.inner.consume(line_len);
+                        continue;
+                    }
+                    let n = out.len().min(line_len);
+                    out[..n].copy_from_slice(&buf[..n]);
+                    if n < line_len {
+                        self.partial.extend_from_slice(&buf[n..line_len]);
+                        self.partial_pos = 0;
+                    }
+                    self.inner.consume(line_len);
+                    return Ok(n);
+                }
+                None => {
+                    // No newline — partial line, can't be a separator.
+                    let buf_len = buf.len();
+                    let n = out.len().min(buf_len);
+                    out[..n].copy_from_slice(&buf[..n]);
+                    if n < buf_len {
+                        self.partial.extend_from_slice(&buf[n..buf_len]);
+                        self.partial_pos = 0;
+                    }
+                    self.inner.consume(buf_len);
+                    return Ok(n);
+                }
             }
         }
-
-        let n = buf.len().min(self.buf.len());
-        buf[..n].copy_from_slice(&self.buf[..n]);
-        self.pos = n;
-        if self.pos == self.buf.len() {
-            self.buf.clear();
-            self.pos = 0;
-        }
-        Ok(n)
     }
 }
 
