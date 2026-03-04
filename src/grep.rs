@@ -67,10 +67,17 @@ impl<R: Read> Read for GrepFilter<R> {
             return Ok(n);
         }
 
+        let mut filled = 0;
+
         loop {
             let buf = self.inner.fill_buf()?;
             if buf.is_empty() {
-                return Ok(0);
+                return Ok(filled);
+            }
+
+            let remaining = &mut out[filled..];
+            if remaining.is_empty() {
+                return Ok(filled);
             }
 
             match memchr::memchr(b'\n', buf) {
@@ -80,26 +87,26 @@ impl<R: Read> Read for GrepFilter<R> {
                         self.inner.consume(line_len);
                         continue;
                     }
-                    let n = out.len().min(line_len);
-                    out[..n].copy_from_slice(&buf[..n]);
+                    let n = remaining.len().min(line_len);
+                    remaining[..n].copy_from_slice(&buf[..n]);
                     if n < line_len {
                         self.partial.extend_from_slice(&buf[n..line_len]);
                         self.partial_pos = 0;
                     }
                     self.inner.consume(line_len);
-                    return Ok(n);
+                    filled += n;
                 }
                 None => {
                     // No newline — partial line, can't be a separator.
                     let buf_len = buf.len();
-                    let n = out.len().min(buf_len);
-                    out[..n].copy_from_slice(&buf[..n]);
+                    let n = remaining.len().min(buf_len);
+                    remaining[..n].copy_from_slice(&buf[..n]);
                     if n < buf_len {
                         self.partial.extend_from_slice(&buf[n..buf_len]);
                         self.partial_pos = 0;
                     }
                     self.inner.consume(buf_len);
-                    return Ok(n);
+                    filled += n;
                 }
             }
         }
