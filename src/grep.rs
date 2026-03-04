@@ -9,6 +9,26 @@ use std::io::{BufRead, BufReader, Read};
 ///
 /// Only exact `--\n` and `--\r\n` lines are stripped. Similar lines like
 /// `---\n` or `-- \n` pass through unchanged.
+///
+/// # When to skip this filter
+///
+/// `GrepFilter` adds a small per-byte overhead (~3% CPU on large files) for
+/// newline scanning even when no separators are present. If your application
+/// opens dump files directly (not piped through grep), pass the reader
+/// straight to [`FrameIterator`](crate::FrameIterator) /
+/// [`MessageIterator`](crate::MessageIterator) /
+/// [`ParsedMessageIterator`](crate::ParsedMessageIterator) without wrapping:
+///
+/// ```no_run
+/// use std::fs::File;
+/// use freeswitch_sofia_trace_parser::ParsedMessageIterator;
+///
+/// // Direct file — no GrepFilter overhead
+/// let file = File::open("profile.dump").unwrap();
+/// for msg in ParsedMessageIterator::new(file) {
+///     // ...
+/// }
+/// ```
 pub struct GrepFilter<R> {
     inner: BufReader<R>,
     /// Accumulates a partial line when `--\n` / `--\r\n` detection straddles

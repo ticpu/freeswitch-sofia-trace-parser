@@ -97,6 +97,10 @@ struct Cli {
     #[arg(long)]
     unparsed: bool,
 
+    /// Skip grep separator filtering (faster when reading files directly)
+    #[arg(long)]
+    no_grep_filter: bool,
+
     /// Increase verbosity (-v info, -vv debug, -vvv trace)
     #[arg(short, long, action = clap::ArgAction::Count)]
     verbose: u8,
@@ -265,7 +269,7 @@ fn output_mode(cli: &Cli) -> OutputMode {
     }
 }
 
-fn open_input(files: &[String]) -> Box<dyn Read> {
+fn open_input(files: &[String], grep_filter: bool) -> Box<dyn Read> {
     let raw: Box<dyn Read> = if files.is_empty() || (files.len() == 1 && files[0] == "-") {
         Box::new(io::stdin().lock())
     } else {
@@ -294,7 +298,11 @@ fn open_input(files: &[String]) -> Box<dyn Read> {
             chain
         }
     };
-    Box::new(GrepFilter::new(raw))
+    if grep_filter {
+        Box::new(GrepFilter::new(raw))
+    } else {
+        raw
+    }
 }
 
 fn init_tracing(verbose: u8) {
@@ -700,19 +708,33 @@ fn main() {
     let capture = cli.unparsed;
 
     let stats = if cli.frames {
-        run_frames(open_input(&cli.files), capture)
+        run_frames(open_input(&cli.files, !cli.no_grep_filter), capture)
     } else if cli.raw {
-        run_raw(open_input(&cli.files), capture)
+        run_raw(open_input(&cli.files, !cli.no_grep_filter), capture)
     } else {
         let filters = compile_filters(&cli);
         let mode = output_mode(&cli);
 
         if cli.dialog {
-            run_dialog(open_input(&cli.files), &mode, &filters, capture)
+            run_dialog(
+                open_input(&cli.files, !cli.no_grep_filter),
+                &mode,
+                &filters,
+                capture,
+            )
         } else if cli.stats {
-            run_stats(open_input(&cli.files), &filters, capture)
+            run_stats(
+                open_input(&cli.files, !cli.no_grep_filter),
+                &filters,
+                capture,
+            )
         } else {
-            run_filtered(open_input(&cli.files), &mode, &filters, capture)
+            run_filtered(
+                open_input(&cli.files, !cli.no_grep_filter),
+                &mode,
+                &filters,
+                capture,
+            )
         }
     };
 
