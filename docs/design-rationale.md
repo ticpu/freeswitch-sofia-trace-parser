@@ -8,15 +8,46 @@ into `.dump.1.xz`, `.dump.2.xz`, etc. These files are the primary diagnostic
 tool for NG-911 call tracing, incident reconstruction, and SIP interop debugging
 in production PSAP environments.
 
-Before this library, the only parser was a Bash/awk script (`cauca_freeswitch-sip-trace-analyzer`)
-that loaded entire dump files into memory (~2GB per profile), performed line-by-line
-text matching, and couldn't handle TCP reassembly, multipart MIME, or structured
-SIP parsing. It worked, but it was slow, fragile, and couldn't be composed into
-other tools.
+The first parser was a Bash/awk script (`cauca_freeswitch-sip-trace-analyzer`)
+that loaded entire dump files into memory (~2GB per profile), performed
+line-by-line text matching, and couldn't handle TCP reassembly, multipart
+MIME, or structured SIP parsing.
 
-This library was designed to be a correct, streaming, reusable foundation that
-exposes the dump file format honestly and lets callers decide what to do with
-the data.
+Its Rust successor (`freeswitch-sip-trace-analyzer`) tried to solve this
+inline but accumulated four overlapping parsing subsystems over time, each
+handling part of the format with different failure modes:
+
+- A line-based parser using `recv `/`sent ` prefix detection that replaced
+  `\x0B` with `^K` in output because it couldn't distinguish frame
+  boundaries from `\x0B` appearing inside XML content.
+- A `LazyMessageStitcher` that tried TCP reassembly by looking ahead
+  through pre-split text strings, checking direction/connection/timestamp
+  continuity with string heuristics — which broke on interleaved
+  connections from different endpoints.
+- A three-phase structured parser that introduced `memmap2`, `lz4_flex`,
+  `tempfile`, and `lazy_static` as intermediate storage for a multi-pass
+  approach.
+- Supporting infrastructure for message hashing, deduplication, and
+  memory-mapped output accumulation.
+
+These subsystems had concrete bugs that surfaced on production data:
+UTF-8 boundary panics when slicing SIP content at byte offsets that split
+multi-byte sequences, incorrect TCP reassembly when same-direction frames
+from different connections interleaved, and Content-Length splitting that
+failed when body content contained SIP-like patterns. File concatenation
+across logrotate boundaries (`cat dump.29 dump.28`) broke because the
+inline parsers had no concept of truncated first frames.
+
+This library extracted parsing into a dedicated, independently tested
+concern. It replaced ~4,500 lines of fragile inline parsing with a
+streaming `impl Read` API validated against 5.5GB of production dumps.
+Separating parsing from application logic also unlocked downstream
+features that were impractical against line-based text: dialog
+participant role classification (Caller/Calltaker/Bridge/Responder from
+typed headers and methods), AI-compact message formatting (abbreviated
+headers via typed access instead of regex), and structure-aware
+colorization that is correct by construction for any SIP method or
+response code.
 
 ## Why Three Levels
 
