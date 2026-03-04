@@ -254,9 +254,11 @@ fn parse_request_line(line: &[u8]) -> Result<SipMessageType, ParseError> {
 }
 
 fn bytes_to_string(b: &[u8]) -> String {
-    match std::str::from_utf8(b) {
-        Ok(s) => s.to_owned(),
-        Err(_) => String::from_utf8_lossy(b).into_owned(),
+    if b.is_ascii() {
+        // SAFETY: ASCII is a subset of UTF-8; is_ascii() guarantees all bytes < 128
+        unsafe { String::from_utf8_unchecked(b.to_vec()) }
+    } else {
+        String::from_utf8_lossy(b).into_owned()
     }
 }
 
