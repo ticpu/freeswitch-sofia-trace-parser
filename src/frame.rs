@@ -955,8 +955,25 @@ mod tests {
     #[test]
     fn frame_iterator_only_garbage() {
         let data = b"this is not a SIP trace dump at all, just garbage text";
-        let frames: Vec<Result<Frame, ParseError>> = FrameIterator::new(&data[..]).collect();
+        let mut iter = FrameIterator::new(&data[..]).skip_tracking(SkipTracking::TrackRegions);
+        let frames: Vec<Result<Frame, ParseError>> = iter.by_ref().collect();
         assert!(frames.is_empty());
+        let stats = iter.stats();
+        assert_eq!(stats.bytes_read, data.len() as u64);
+        assert_eq!(stats.bytes_skipped, data.len() as u64);
+        assert_eq!(stats.unparsed_regions.len(), 1);
+        assert_eq!(stats.unparsed_regions[0].reason, SkipReason::InvalidHeader);
+    }
+
+    #[test]
+    fn frame_iterator_truncated_header_at_eof() {
+        let data = b"recv 5 bytes from tcp/1.1.1.1:5060";
+        let mut iter = FrameIterator::new(&data[..]).skip_tracking(SkipTracking::TrackRegions);
+        let frames: Vec<Result<Frame, ParseError>> = iter.by_ref().collect();
+        assert!(frames.is_empty());
+        let stats = iter.stats();
+        assert_eq!(stats.bytes_read, data.len() as u64);
+        assert_eq!(stats.bytes_skipped, data.len() as u64);
     }
 
     #[test]
