@@ -1,0 +1,21 @@
+/var/log/freeswitch/sip_traces/*/*.dump {
+    daily
+    rotate 3650
+    minsize 10M
+    compress
+    compresscmd /usr/bin/xz
+    uncompresscmd /usr/bin/unxz
+    compressoptions -6e
+    compressext .xz
+    notifempty
+    missingok
+    copy
+    nocopytruncate
+    postrotate
+        log_file="$1"
+        rotated_log_file="$2"
+        log_size=$(stat -c%s "$rotated_log_file")
+        rounded_log_size=$((log_size / 4096 * 4096))
+        fallocate -c -o 0 -l $rounded_log_size "$log_file" >/dev/null 2>&1
+    endscript
+}

@@ -311,6 +311,11 @@ to limit memory usage. Unmatched Call-IDs with only OPTIONS traffic are never bu
 | `--stats` | Method and status code distribution + input coverage |
 | `--unparsed` | Report unparsed input regions to stderr (combinable with any mode) |
 
+## FreeSWITCH Setup
+
+See [docs/freeswitch-setup.md](docs/freeswitch-setup.md) for the required patches,
+SIP profile configuration, and log rotation setup.
+
 ## Building
 
 ```sh
