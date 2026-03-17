@@ -28,10 +28,10 @@ cargo fmt
 cargo check --no-default-features --message-format=short  # lib only
 cargo check --message-format=short
 cargo clippy --fix --allow-dirty --message-format=short
-cargo test --lib                    # unit tests (fast, no sample files needed)
-cargo test --test level1_samples    # Level 1 integration tests (requires samples/)
-cargo test --test level2_samples    # Level 2 integration tests (requires samples/)
-cargo test --test level3_samples    # Level 3 integration tests (requires samples/)
+cargo test --release --lib                    # unit tests (fast, no sample files needed)
+cargo test --release --test level1_samples    # Level 1 integration tests (requires samples/)
+cargo test --release --test level2_samples    # Level 2 integration tests (requires samples/)
+cargo test --release --test level3_samples    # Level 3 integration tests (requires samples/)
 ```
 
 ## Release Workflow
@@ -88,6 +88,7 @@ Sample files are raw binary FreeSWITCH dump files (~50-350MB each):
 - `internal-v6.dump.{20..29}` — internal TCP IPv6
 - `esinet1-v6-tls.dump.180` — TLS IPv6 with real traffic (INVITE/NOTIFY/BYE)
 - `esinet1-v4-tls.dump.{179,180}` — TLS IPv4 (180 has real traffic)
+- `esinet1-v4-tcp.dump.4` — TCP IPv4 with ESInet provider traffic
 
 Logrotate numbering: higher number = older file.
 
@@ -101,12 +102,12 @@ The `file_concatenation_two_dumps` test validates `Read::chain()` across two fil
 
 ```sh
 # All integration tests
-cargo test --test level1_samples -- --nocapture
-cargo test --test level2_samples -- --nocapture
-cargo test --test level3_samples -- --nocapture
+cargo test --release --test level1_samples -- --nocapture
+cargo test --release --test level2_samples -- --nocapture
+cargo test --release --test level3_samples -- --nocapture
 
 # Single test
-cargo test --test level1_samples esinet1_v4_tcp -- --nocapture
+cargo test --release --test level1_samples esinet1_v4_tcp -- --nocapture
 ```
 
 ## Development Methodology — TDD

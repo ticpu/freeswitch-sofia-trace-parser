@@ -138,6 +138,56 @@ fn tcp_all_messages_parse() {
 }
 
 #[test]
+fn tcp_v4_dump_4_all_parse() {
+    let result = parse_file("esinet1-v4-tcp.dump.4");
+    if result.total == 0 {
+        return;
+    }
+    assert_parse_stats(&result.stats, "esinet1-v4-tcp.dump.4", 1);
+    let msgs = &result.parsed;
+
+    eprintln!(
+        "esinet1-v4-tcp.dump.4: {} parsed, {} errors out of {} total",
+        msgs.len(),
+        result.errors,
+        result.total
+    );
+
+    let requests = msgs
+        .iter()
+        .filter(|m| matches!(m.message_type, SipMessageType::Request { .. }))
+        .count();
+    let responses = msgs
+        .iter()
+        .filter(|m| matches!(m.message_type, SipMessageType::Response { .. }))
+        .count();
+    eprintln!("  requests: {requests}, responses: {responses}");
+
+    assert!(requests > 0, "should have requests");
+    assert!(responses > 0, "should have responses");
+
+    let success_rate = msgs.len() as f64 / result.total as f64;
+    assert!(
+        success_rate > 0.999,
+        "parse success rate too low: {:.3}%",
+        success_rate * 100.0
+    );
+
+    let with_callid = msgs.iter().filter(|m| m.call_id().is_some()).count();
+    let ratio = with_callid as f64 / msgs.len() as f64;
+    eprintln!(
+        "  with Call-ID: {with_callid}/{} ({:.1}%)",
+        msgs.len(),
+        ratio * 100.0
+    );
+    assert!(
+        ratio > 0.99,
+        "expected >99% of messages to have Call-ID, got {:.1}%",
+        ratio * 100.0
+    );
+}
+
+#[test]
 fn tcp_method_distribution() {
     let result = parse_file("esinet1-v4-tcp.dump.20");
     if result.total == 0 {

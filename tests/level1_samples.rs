@@ -552,6 +552,40 @@ fn file_concatenation_two_dumps() {
 }
 
 #[test]
+fn esinet1_v4_tcp_4() {
+    let result = parse_sample("esinet1-v4-tcp.dump.4");
+    let frames = &result.frames;
+    if frames.is_empty() {
+        return;
+    }
+    assert_all_frames_valid(frames, "esinet1-v4-tcp.dump.4");
+    assert_parse_stats(&result.stats, "esinet1-v4-tcp.dump.4", 1);
+
+    assert!(
+        frames.iter().all(|f| f.transport == Transport::Tcp),
+        "expected all TCP frames"
+    );
+
+    let (recv, sent) = count_by_direction(frames);
+    assert!(recv > 0, "expected recv frames");
+    assert!(sent > 0, "expected sent frames");
+
+    let mismatches: Vec<_> = frames
+        .iter()
+        .enumerate()
+        .filter(|(_, f)| f.byte_count != f.content.len())
+        .collect();
+
+    eprintln!(
+        "esinet1-v4-tcp.dump.4: {} frames ({} recv, {} sent), {} byte_count mismatches",
+        frames.len(),
+        recv,
+        sent,
+        mismatches.len(),
+    );
+}
+
+#[test]
 fn esinet1_v4_tcp_150() {
     let result = parse_sample("esinet1-v4-tcp.dump.150");
     let frames = &result.frames;

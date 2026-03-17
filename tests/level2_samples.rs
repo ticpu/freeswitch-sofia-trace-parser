@@ -291,6 +291,64 @@ fn tcp_interleaved_reassembly() {
 }
 
 #[test]
+fn tcp_v4_dump_4_reassembly() {
+    let path = sample_dir().join("esinet1-v4-tcp.dump.4");
+    if !path.exists() {
+        eprintln!("skipping: file not found");
+        return;
+    }
+
+    let frame_count = freeswitch_sofia_trace_parser::FrameIterator::new(File::open(&path).unwrap())
+        .filter_map(Result::ok)
+        .count();
+
+    let mut iter =
+        MessageIterator::new(File::open(&path).unwrap()).skip_tracking(SkipTracking::TrackRegions);
+    let msgs: Vec<_> = iter.by_ref().filter_map(Result::ok).collect();
+    let msg_count = msgs.len();
+
+    eprintln!("esinet1-v4-tcp.dump.4: {frame_count} frames → {msg_count} messages");
+    assert!(
+        msg_count < frame_count,
+        "TCP reassembly should produce fewer messages than frames"
+    );
+    assert!(msg_count > 0, "should produce at least one message");
+    assert_parse_stats(iter.parse_stats(), "esinet1-v4-tcp.dump.4", 1);
+
+    // All messages should start with a SIP line
+    let sip_start_count = msgs
+        .iter()
+        .filter(|m| {
+            m.content.starts_with(b"SIP/2.0 ")
+                || m.content.starts_with(b"INVITE ")
+                || m.content.starts_with(b"ACK ")
+                || m.content.starts_with(b"BYE ")
+                || m.content.starts_with(b"CANCEL ")
+                || m.content.starts_with(b"OPTIONS ")
+                || m.content.starts_with(b"REGISTER ")
+                || m.content.starts_with(b"SUBSCRIBE ")
+                || m.content.starts_with(b"NOTIFY ")
+                || m.content.starts_with(b"PUBLISH ")
+                || m.content.starts_with(b"INFO ")
+                || m.content.starts_with(b"REFER ")
+                || m.content.starts_with(b"MESSAGE ")
+                || m.content.starts_with(b"UPDATE ")
+                || m.content.starts_with(b"PRACK ")
+        })
+        .count();
+    let ratio = sip_start_count as f64 / msg_count as f64;
+    eprintln!(
+        "  messages starting with SIP line: {sip_start_count}/{msg_count} ({:.1}%)",
+        ratio * 100.0
+    );
+    assert!(
+        ratio > 0.99,
+        "expected >99% of messages to start with SIP line, got {:.1}%",
+        ratio * 100.0
+    );
+}
+
+#[test]
 fn message_content_starts_with_sip() {
     let result = parse_messages("esinet1-v4-tcp.dump.20");
     let msgs = &result.messages;
