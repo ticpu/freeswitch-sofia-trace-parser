@@ -50,6 +50,10 @@ pub mod grep;
 /// Level 2: TCP reassembly and Content-Length-based message splitting.
 pub mod message;
 
+/// On-demand pcap export: synthesize libpcap packets from parsed frames/messages.
+#[cfg(feature = "pcap")]
+pub mod pcap;
+
 /// Level 3: SIP message parsing, multipart MIME, and JSON body handling.
 pub mod sip;
 
@@ -59,5 +63,7 @@ pub mod types;
 pub use frame::{FrameIterator, ParseError};
 pub use grep::GrepFilter;
 pub use message::MessageIterator;
+#[cfg(feature = "pcap")]
+pub use pcap::{PcapConfig, PcapError, PcapLayer, PcapWriter};
 pub use sip::ParsedMessageIterator;
 pub use types::*;

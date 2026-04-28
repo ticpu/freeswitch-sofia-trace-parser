@@ -116,7 +116,7 @@ impl Direction {
 }
 
 /// SIP transport protocol as reported in the frame header.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Transport {
     /// Transmission Control Protocol.
     Tcp,

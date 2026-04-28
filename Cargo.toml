@@ -21,7 +21,8 @@ required-features = ["cli"]
 
 [features]
 default = []
-cli = ["dep:clap", "dep:tracing-subscriber", "dep:regex", "dep:quoted_printable"]
+cli = ["pcap", "dep:clap", "dep:tracing-subscriber", "dep:regex", "dep:quoted_printable"]
+pcap = []
 torture-test = ["dep:rayon", "dep:sip-uri"]
 pidf-test = ["dep:rayon", "dep:eido"]
 
