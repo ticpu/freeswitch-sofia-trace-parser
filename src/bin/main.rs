@@ -528,7 +528,7 @@ fn run_stats(
     }
 
     let mut methods: Vec<_> = method_counts.into_iter().collect();
-    methods.sort_by(|a, b| b.1.cmp(&a.1));
+    methods.sort_by_key(|b| std::cmp::Reverse(b.1));
     if !methods.is_empty() {
         println!("\nmethods:");
         for (method, count) in &methods {

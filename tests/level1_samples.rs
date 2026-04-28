@@ -484,7 +484,7 @@ fn byte_count_distribution() {
     }
 
     let mut top: Vec<_> = sizes.into_iter().collect();
-    top.sort_by(|a, b| b.1.cmp(&a.1));
+    top.sort_by_key(|b| std::cmp::Reverse(b.1));
 
     eprintln!("esinet1-v4-tcp byte_count distribution (top 10):");
     for (size, count) in top.iter().take(10) {

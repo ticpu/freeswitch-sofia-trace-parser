@@ -204,7 +204,7 @@ fn tcp_method_distribution() {
     }
 
     let mut sorted: Vec<_> = methods.into_iter().collect();
-    sorted.sort_by(|a, b| b.1.cmp(&a.1));
+    sorted.sort_by_key(|b| std::cmp::Reverse(b.1));
 
     eprintln!("esinet1-v4-tcp method distribution:");
     for (method, count) in &sorted {
@@ -257,7 +257,7 @@ fn tls_v6_all_messages_parse() {
     }
 
     let mut sorted: Vec<_> = methods.into_iter().collect();
-    sorted.sort_by(|a, b| b.1.cmp(&a.1));
+    sorted.sort_by_key(|b| std::cmp::Reverse(b.1));
 
     eprintln!("  method distribution:");
     for (method, count) in &sorted {
@@ -452,7 +452,7 @@ fn tcp_multipart_bodies() {
     eprintln!("  total parts: {total_parts}, parse failures: {parse_failures}");
 
     let mut sorted: Vec<_> = ct_distribution.into_iter().collect();
-    sorted.sort_by(|a, b| b.1.cmp(&a.1));
+    sorted.sort_by_key(|b| std::cmp::Reverse(b.1));
     eprintln!("  part content-type distribution:");
     for (ct, count) in &sorted {
         eprintln!("    {ct}: {count}");

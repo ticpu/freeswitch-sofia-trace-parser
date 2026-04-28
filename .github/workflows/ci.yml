@@ -18,6 +18,12 @@ jobs:
     - name: Install Rust
       uses: dtolnay/rust-toolchain@stable
 
+    - name: Strip private eido dep (pidf-test feature unavailable in public CI)
+      run: |
+        sed -i '/^pidf-test = /d' Cargo.toml
+        sed -i '/^eido = /d' Cargo.toml
+        rm -f tests/pidf_torture.rs
+
     - name: Cache cargo
       uses: actions/cache@v4
       with:
