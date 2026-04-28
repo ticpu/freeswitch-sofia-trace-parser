@@ -13,6 +13,8 @@ use freeswitch_sofia_trace_parser::{
     ParsedSipMessage, SipMessage,
 };
 
+mod pcap;
+
 enum OutputMode {
     Summary,
     Full,
@@ -92,6 +94,14 @@ struct Cli {
     /// Show statistics summary
     #[arg(long, group = "output_mode")]
     stats: bool,
+
+    /// Emit libpcap to stdout (use --pcap-layer to pick depth)
+    #[arg(long, group = "output_mode")]
+    pcap_export: bool,
+
+    /// Pcap depth: 3 = Level-1 frames as IP+SIP (proto 253), 4 = Level-2 messages as IP+UDP/TCP+SIP
+    #[arg(long, value_name = "N", default_value_t = 4)]
+    pcap_layer: u8,
 
     /// Report unparsed input regions to stderr
     #[arg(long)]
@@ -705,9 +715,37 @@ fn main() {
         process::exit(2);
     }
 
+    if cli.pcap_export && !matches!(cli.pcap_layer, 3 | 4) {
+        eprintln!("--pcap-layer must be 3 or 4");
+        process::exit(2);
+    }
+
+    let layer3_filter_set = !cli.method.is_empty()
+        || !cli.exclude.is_empty()
+        || cli.call_id.is_some()
+        || cli.direction.is_some()
+        || cli.address.is_some()
+        || !cli.header.is_empty()
+        || cli.body_grep.is_some()
+        || cli.grep.is_some()
+        || cli.dialog;
+    if cli.pcap_export && cli.pcap_layer == 3 && layer3_filter_set {
+        eprintln!("--pcap-layer 3 emits raw frames; SIP-level filters are not applicable");
+        process::exit(2);
+    }
+
     let capture = cli.unparsed;
 
-    let stats = if cli.frames {
+    let stats = if cli.pcap_export && cli.pcap_layer == 3 {
+        pcap::run_layer3(open_input(&cli.files, !cli.no_grep_filter), capture)
+    } else if cli.pcap_export {
+        let filters = compile_filters(&cli);
+        pcap::run_layer4(
+            open_input(&cli.files, !cli.no_grep_filter),
+            &filters,
+            capture,
+        )
+    } else if cli.frames {
         run_frames(open_input(&cli.files, !cli.no_grep_filter), capture)
     } else if cli.raw {
         run_raw(open_input(&cli.files, !cli.no_grep_filter), capture)
