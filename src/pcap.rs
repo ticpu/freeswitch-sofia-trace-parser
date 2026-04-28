@@ -8,6 +8,14 @@
 //! Caller supplies the policy (local addresses, date anchor for time-only
 //! timestamps); the library makes no assumptions.
 //!
+//! Three entry points are offered, matching the three iterator levels:
+//!
+//! - [`PcapWriter::write_frame`] for [`Frame`] (Level 1, raw frames)
+//! - [`PcapWriter::write_message`] for [`SipMessage`] (Level 2, reassembled)
+//! - [`PcapWriter::write_parsed`] for [`ParsedSipMessage`] (Level 3, parsed)
+//!
+//! All three share the same IP/TCP/UDP synthesis and TCP sequence tracking.
+//!
 //! # Quick start
 //!
 //! ```no_run
@@ -29,7 +37,7 @@ use std::io::{self, Write};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::str::FromStr;
 
-use crate::types::{Direction, Frame, SipMessage, Timestamp, Transport};
+use crate::types::{Direction, Frame, ParsedSipMessage, SipMessage, Timestamp, Transport};
 
 const PCAP_MAGIC_USEC: u32 = 0xa1b2c3d4;
 const PCAP_VERSION_MAJOR: u16 = 2;
@@ -185,6 +193,18 @@ impl<W: Write> PcapWriter<W> {
             &msg.address,
             msg.timestamp,
             &msg.content,
+        )
+    }
+
+    /// Emit one packet for a Level-3 parsed message. The wire-format payload
+    /// is reconstructed via [`ParsedSipMessage::to_bytes`].
+    pub fn write_parsed(&mut self, msg: &ParsedSipMessage) -> Result<(), PcapError> {
+        self.emit(
+            msg.direction,
+            msg.transport,
+            &msg.address,
+            msg.timestamp,
+            &msg.to_bytes(),
         )
     }
 
@@ -751,5 +771,95 @@ mod tests {
         assert_eq!(days_from_civil(1970, 1, 1), 0);
         assert_eq!(days_from_civil(1970, 1, 2), 1);
         assert_eq!(days_from_civil(1969, 12, 31), -1);
+    }
+
+    use crate::types::SipMessageType;
+
+    fn parsed(
+        direction: Direction,
+        transport: Transport,
+        addr: &str,
+        method: &str,
+        uri: &str,
+        headers: &[(&str, &str)],
+        body: &[u8],
+    ) -> ParsedSipMessage {
+        ParsedSipMessage {
+            direction,
+            transport,
+            address: addr.to_string(),
+            timestamp: Timestamp::TimeOnly {
+                hour: 12,
+                min: 0,
+                sec: 0,
+                usec: 0,
+            },
+            message_type: SipMessageType::Request {
+                method: method.to_string(),
+                uri: uri.to_string(),
+            },
+            headers: headers
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect(),
+            body: body.to_vec(),
+            frame_count: 1,
+        }
+    }
+
+    #[test]
+    fn write_parsed_payload_round_trips() {
+        let (mut w, _) = writer_transport();
+        let msg = parsed(
+            Direction::Recv,
+            Transport::Udp,
+            "10.0.0.1:5060",
+            "OPTIONS",
+            "sip:host",
+            &[("Call-ID", "rt-test"), ("Content-Length", "0")],
+            b"",
+        );
+        let expected_payload = msg.to_bytes();
+        w.write_parsed(&msg).unwrap();
+        let bytes = w.into_inner();
+        // global 24 + record 16 + SLL 16 + IPv4 20 + UDP 8 = 84
+        let payload = &bytes[84..];
+        assert_eq!(payload, expected_payload.as_slice());
+    }
+
+    #[test]
+    fn write_parsed_matches_write_message() {
+        let payload = b"OPTIONS sip:host SIP/2.0\r\nCall-ID: eq-test\r\n\r\n";
+        let mut wm = PcapWriter::new(Vec::new(), PcapConfig::default()).unwrap();
+        wm.write_message(&SipMessage {
+            direction: Direction::Recv,
+            transport: Transport::Udp,
+            address: "10.0.0.1:5060".into(),
+            timestamp: Timestamp::TimeOnly {
+                hour: 12,
+                min: 0,
+                sec: 0,
+                usec: 0,
+            },
+            content: payload.to_vec(),
+            frame_count: 1,
+        })
+        .unwrap();
+        let from_message = wm.into_inner();
+
+        let mut wp = PcapWriter::new(Vec::new(), PcapConfig::default()).unwrap();
+        wp.write_parsed(&parsed(
+            Direction::Recv,
+            Transport::Udp,
+            "10.0.0.1:5060",
+            "OPTIONS",
+            "sip:host",
+            &[("Call-ID", "eq-test")],
+            b"",
+        ))
+        .unwrap();
+        let from_parsed = wp.into_inner();
+
+        assert_eq!(from_message, from_parsed);
     }
 }
