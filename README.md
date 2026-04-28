@@ -104,6 +104,36 @@ for result in ParsedMessageIterator::new(file) {
 }
 ```
 
+### Pcap export (feature: `pcap`)
+
+```toml
+[dependencies]
+freeswitch-sofia-trace-parser = { version = "0", features = ["pcap"] }
+```
+
+```rust
+use std::fs::File;
+use freeswitch_sofia_trace_parser::{MessageIterator, PcapConfig, PcapWriter};
+
+let dump = File::open("profile.dump")?;
+let pcap = File::create("trace.pcap")?;
+let mut w = PcapWriter::new(pcap, PcapConfig::default())?;
+for result in MessageIterator::new(dump) {
+    w.write_message(&result?)?;
+}
+```
+
+`PcapWriter` synthesizes a libpcap-classic file from parsed frames or
+reassembled messages. The dump only carries the remote endpoint, so the
+caller supplies a local endpoint via `PcapConfig` (defaults: RFC 5737
+`192.0.2.1:5060` and RFC 3849 `[2001:db8::1]:5060` documentation
+addresses). TLS/WSS payloads are decrypted SIP in the dump and are
+emitted as plain TCP on the original ports.
+
+`PcapLayer::Transport` (default) emits SLL + IP + UDP/TCP + SIP for
+direct Wireshark dissection. `PcapLayer::Network` emits LINKTYPE_RAW + IP
++ SIP-as-IP-payload (proto 253) for tooling that consumes raw IP.
+
 ### Streaming from pipes
 
 ```rust
@@ -255,6 +285,10 @@ freeswitch-sofia-trace-parser profile.dump.2 profile.dump.1 profile.dump
 # Raw frames (level 1) or reassembled messages (level 2)
 freeswitch-sofia-trace-parser --frames profile.dump
 freeswitch-sofia-trace-parser --raw profile.dump
+
+# Export matched messages to pcap (stdout)
+freeswitch-sofia-trace-parser -c '6fba3e7e' --pcap-export profile.dump > call.pcap
+freeswitch-sofia-trace-parser --pcap-export --pcap-layer 3 profile.dump > raw-ip.pcap
 ```
 
 ### Dialog mode
@@ -309,6 +343,8 @@ to limit memory usage. Unmatched Call-IDs with only OPTIONS traffic are never bu
 | `--raw` | Raw reassembled bytes (level 2) |
 | `--frames` | Raw frames (level 1) |
 | `--stats` | Method and status code distribution + input coverage |
+| `--pcap-export` | Emit libpcap-classic to stdout (use with `--pcap-layer 3\|4`) |
+| `--pcap-layer N` | 3 = Level-1 frames as IP+SIP (proto 253); 4 = Level-2 messages as IP+UDP/TCP+SIP (default) |
 | `--unparsed` | Report unparsed input regions to stderr (combinable with any mode) |
 
 ## FreeSWITCH Setup

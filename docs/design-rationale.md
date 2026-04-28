@@ -315,6 +315,51 @@ extracting location data (PIDF-LO XML) separately from session
 description (SDP), and no SIP library we found handled FreeSWITCH's
 dump format.
 
+## Pcap on Demand from Text Traces
+
+FreeSWITCH dumps are text traces of decrypted SIP. The natural workflow for an
+operator is: open the dump, find a Call-ID, extract the dialog, hand it to
+Wireshark. Capturing the same traffic at the wire — with `tcpdump` on a TLS
+SIP profile — requires session keys we don't keep, leaves a haystack of
+unrelated calls, and is unavailable retroactively. The pcap module inverts
+the problem: search in text with this library's filters, then synthesize a
+pcap that contains *only* the matched stream. No keys, no noise, no live
+capture window.
+
+The output is libpcap-classic, not pcapng — every NG-911 tool we ship to
+operators reads classic pcap; pcapng's per-packet metadata earns no value
+here. `LINKTYPE_LINUX_SLL` is the link type for layer-4 export because its
+`pkttype` field encodes recv vs sent without inventing MAC addresses, and
+because the dump records direction per frame. TLS and WSS frames are written
+as plain TCP on their original ports (5061, etc.) — the dump payload is
+already-decrypted SIP, so re-wrapping it in TLS records would only add
+ciphertext we cannot produce. Wireshark dissects SIP from any TCP stream
+once port-based heuristics fire, so synthesizing SYN/FIN handshakes adds no
+dissector benefit; the writer omits them and starts each connection's SEQ
+at zero.
+
+Layer-3 export (LINKTYPE_RAW, IP proto 253 from RFC 3692 testing range)
+exists for the case where the consumer wants raw IP payloads without
+inventing transport state — useful for one-packet-per-frame review where
+TCP segmentation order matters. The library exposes `write_frame` and
+`write_message` independently; the CLI's `--pcap-layer 3|4` couples
+layer-3-with-frames and layer-4-with-messages because that pairing is what
+makes each output legible in Wireshark.
+
+The synthetic local endpoint defaults to RFC 5737 (`192.0.2.1`) and RFC 3849
+(`2001:db8::1`) — addresses reserved for documentation, guaranteed never to
+collide with real traffic. This is a library default, not a hard-coded
+constant; callers override `PcapConfig::local_v4`/`local_v6` for site-
+specific synthesis. Date anchoring for the older `Timestamp::TimeOnly`
+format is also a caller decision (`PcapConfig::date_base`); the library
+makes no policy choice between "use file mtime" and "use today" because
+both can be wrong, and pure integer civil-day math (Howard Hinnant's
+`days_from_civil`) avoids pulling `chrono` into the public API where a
+major-version bump would become a semver break.
+
+The module is behind a `pcap` feature flag. Library consumers that only
+need parsing pay nothing for it; the CLI enables it transitively.
+
 ## Error Recovery at Frame Boundaries
 
 FreeSWITCH writes "dump started at Thu Oct 10 11:59:14 2024" lines
