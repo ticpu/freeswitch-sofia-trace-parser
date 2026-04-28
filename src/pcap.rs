@@ -182,6 +182,7 @@ impl<W: Write> PcapWriter<W> {
             &frame.address,
             frame.timestamp,
             &frame.content,
+            None,
         )
     }
 
@@ -193,18 +194,34 @@ impl<W: Write> PcapWriter<W> {
             &msg.address,
             msg.timestamp,
             &msg.content,
+            None,
         )
     }
 
     /// Emit one packet for a Level-3 parsed message. The wire-format payload
     /// is reconstructed via [`ParsedSipMessage::to_bytes`].
     pub fn write_parsed(&mut self, msg: &ParsedSipMessage) -> Result<(), PcapError> {
+        self.write_parsed_with_local(msg, None)
+    }
+
+    /// Like [`write_parsed`](Self::write_parsed), but with an explicit local
+    /// endpoint override for this packet only. When `local_override` is
+    /// `Some`, it replaces [`PcapConfig::local_v4`] / [`PcapConfig::local_v6`]
+    /// just for this packet (still validated for matching IP family). Useful
+    /// for callers that derive the actual FreeSWITCH local address per
+    /// connection from SIP `Via:` headers.
+    pub fn write_parsed_with_local(
+        &mut self,
+        msg: &ParsedSipMessage,
+        local_override: Option<SocketAddr>,
+    ) -> Result<(), PcapError> {
         self.emit(
             msg.direction,
             msg.transport,
             &msg.address,
             msg.timestamp,
             &msg.to_bytes(),
+            local_override,
         )
     }
 
@@ -225,11 +242,15 @@ impl<W: Write> PcapWriter<W> {
         address: &str,
         timestamp: Timestamp,
         payload: &[u8],
+        local_override: Option<SocketAddr>,
     ) -> Result<(), PcapError> {
         let remote = parse_remote_address(address)?;
-        let local = match remote {
-            SocketAddr::V4(_) => self.config.local_v4,
-            SocketAddr::V6(_) => self.config.local_v6,
+        let local = match local_override {
+            Some(addr) => addr,
+            None => match remote {
+                SocketAddr::V4(_) => self.config.local_v4,
+                SocketAddr::V6(_) => self.config.local_v6,
+            },
         };
         if remote.is_ipv4() != local.is_ipv4() {
             return Err(PcapError::AddressFamilyMismatch);
@@ -861,5 +882,46 @@ mod tests {
         let from_parsed = wp.into_inner();
 
         assert_eq!(from_message, from_parsed);
+    }
+
+    #[test]
+    fn write_parsed_with_local_overrides_default() {
+        let (mut w, _) = writer_transport();
+        let msg = parsed(
+            Direction::Recv,
+            Transport::Udp,
+            "10.0.0.1:5060",
+            "OPTIONS",
+            "sip:host",
+            &[("Call-ID", "ovr-test")],
+            b"",
+        );
+        let local = SocketAddr::from_str("10.20.30.40:5070").unwrap();
+        w.write_parsed_with_local(&msg, Some(local)).unwrap();
+        let bytes = w.into_inner();
+        // global 24 + record 16 + SLL 16 = 56, IPv4 src at +12
+        let ip = &bytes[56..76];
+        assert_eq!(ip[12..16], [10, 0, 0, 1]); // remote (sender, recv direction)
+        assert_eq!(ip[16..20], [10, 20, 30, 40]); // local override (receiver)
+                                                  // UDP starts at offset 76; dst port = local port = 5070
+        let udp = &bytes[76..];
+        assert_eq!(u16::from_be_bytes([udp[2], udp[3]]), 5070);
+    }
+
+    #[test]
+    fn write_parsed_with_local_rejects_family_mismatch() {
+        let (mut w, _) = writer_transport();
+        let msg = parsed(
+            Direction::Sent,
+            Transport::Udp,
+            "[2001:db8::2]:5060",
+            "OPTIONS",
+            "sip:host",
+            &[("Call-ID", "fam-test")],
+            b"",
+        );
+        let local_v4 = SocketAddr::from_str("10.0.0.1:5060").unwrap();
+        let err = w.write_parsed_with_local(&msg, Some(local_v4)).unwrap_err();
+        assert!(matches!(err, PcapError::AddressFamilyMismatch));
     }
 }
