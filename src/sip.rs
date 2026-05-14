@@ -2,6 +2,7 @@ use std::borrow::Cow;
 use std::sync::LazyLock;
 
 use memchr::memmem;
+use sip_header::extract_all_headers;
 
 use crate::frame::ParseError;
 use crate::message::MessageIterator;
@@ -263,49 +264,8 @@ fn bytes_to_string(b: &[u8]) -> String {
 }
 
 fn parse_headers(data: &[u8]) -> Vec<(String, String)> {
-    let mut headers = Vec::new();
-    if data.is_empty() {
-        return headers;
-    }
-
-    let mut pos = 0;
-    while pos < data.len() {
-        let line_end = CRLF.find(&data[pos..]).unwrap_or(data.len() - pos);
-        let mut line = &data[pos..pos + line_end];
-        pos += line_end + 2; // skip \r\n
-
-        // Handle header folding (continuation lines start with SP or HT)
-        while pos < data.len() && (data[pos] == b' ' || data[pos] == b'\t') {
-            let next_end = CRLF.find(&data[pos..]).unwrap_or(data.len() - pos);
-            // Extend line to include continuation
-            line = &data[line.as_ptr() as usize - data.as_ptr() as usize..pos + next_end];
-            pos += next_end + 2;
-        }
-
-        if line.is_empty() {
-            continue;
-        }
-
-        if let Some(colon) = memchr::memchr(b':', line) {
-            let name = &line[..colon];
-            let value = if colon + 1 < line.len() {
-                trim_header_value(&line[colon + 1..])
-            } else {
-                &[]
-            };
-            headers.push((bytes_to_string(name), bytes_to_string(value)));
-        }
-    }
-
-    headers
-}
-
-fn trim_header_value(b: &[u8]) -> &[u8] {
-    let start = b
-        .iter()
-        .position(|&c| c != b' ' && c != b'\t')
-        .unwrap_or(b.len());
-    &b[start..]
+    let text = String::from_utf8_lossy(data);
+    extract_all_headers(&text)
 }
 
 impl ParsedSipMessage {
@@ -715,12 +675,23 @@ mod tests {
             .iter()
             .find(|(k, _)| k == "Subject")
             .map(|(_, v)| v.as_str());
-        assert!(
-            subject.unwrap().contains("folded header value"),
-            "folded header should be reconstructed: {:?}",
-            subject
-        );
+        assert_eq!(subject, Some("this is a long folded header value"));
         assert_eq!(parsed.call_id(), Some("fold-test"));
+    }
+
+    #[test]
+    fn folded_header_no_crlf_leak() {
+        let content = b"OPTIONS sip:host SIP/2.0\r\n\
+            Subject: line1\r\n \
+            line2\r\n\
+            Content-Length: 0\r\n\
+            \r\n";
+        let msg = make_sip_message(content);
+        let parsed = msg.parse().unwrap();
+        let subject = parsed.headers.iter().find(|(k, _)| k == "Subject").unwrap();
+        assert!(!subject.1.contains('\r'), "CRLF leaked: {:?}", subject.1);
+        assert!(!subject.1.contains('\n'), "LF leaked: {:?}", subject.1);
+        assert_eq!(subject.1, "line1 line2");
     }
 
     #[test]
