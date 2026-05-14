@@ -35,5 +35,6 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"], optional = tr
 regex = { version = "1", optional = true }
 quoted_printable = { version = "0.5.1", optional = true }
 rayon = { version = "1", optional = true }
-sip-uri = { version = "0.1.0", optional = true }
+sip-uri = { version = "0.2.2", optional = true }
+sip-header = "0.3"
 eido = { git = "https://gitlab.cauca.ca/cauca-public/eido", features = ["xml"], optional = true }
