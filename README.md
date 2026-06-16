@@ -18,9 +18,22 @@ FreeSWITCH logs SIP traffic to dump files at
 
 This library provides a streaming, multi-level parser:
 
+- **Level 0 — Raw dump**: FreeSWITCH frame headers (`recv/sent N bytes from/to <transport>/<addr> at <ts>:`) and payloads delimited by `\x0B\n` boundaries
 - **Level 1 — Frames**: Split raw bytes on `\x0B\n` boundaries, parse frame headers
 - **Level 2 — Messages**: Reassemble TCP segments, split aggregated messages by Content-Length
 - **Level 3 — Parsed SIP**: Extract method/status, headers, body, and multipart MIME parts
+
+## At a Glance
+
+Point the CLI at a dump file and filter — full reference under [CLI Tool](#cli-tool):
+
+```sh
+$ freeswitch-sofia-trace-parser -m INVITE profile.dump
+2026-06-16 14:32:01.123456 recv tls/[2001:db8::1]:5061 INVITE a1b2c3d4@example.test
+2026-06-16 14:32:01.124891 sent tls/[2001:db8::1]:5061 100 Trying a1b2c3d4@example.test
+2026-06-16 14:32:01.298765 sent tls/[2001:db8::1]:5061 180 Ringing a1b2c3d4@example.test
+2026-06-16 14:32:04.567012 sent tls/[2001:db8::1]:5061 200 OK a1b2c3d4@example.test
+```
 
 ## Library Usage
 
