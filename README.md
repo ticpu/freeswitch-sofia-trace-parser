@@ -393,6 +393,23 @@ The `all_samples_consistent_frame_counts` test iterates all sample files per pro
 
 See [CLAUDE.md](CLAUDE.md) for test architecture details.
 
+## Related crates
+
+FreeSWITCH and SIP crates by the same author, usable independently:
+
+- [`freeswitch-log-parser`](https://crates.io/crates/freeswitch-log-parser) —
+  parses FreeSWITCH's own logs and ships the `fslog` CLI. Complements this
+  crate: it gives you the channel-level view, this one gives you the SIP
+  messages behind it.
+- [`freeswitch-types`](https://crates.io/crates/freeswitch-types) — typed
+  FreeSWITCH enums (call direction, channel/call state, hangup causes).
+- [`freeswitch-esl-tokio`](https://crates.io/crates/freeswitch-esl-tokio) — async
+  ESL client, for reading events off a live switch.
+- [`sip-uri`](https://crates.io/crates/sip-uri) — RFC 3261 SIP/SIPS, RFC 3966
+  `tel:`, RFC 8141 URN parser. Zero dependencies.
+- [`sip-header`](https://crates.io/crates/sip-header) — SIP header field parsers
+  (name-addr, Call-Info, History-Info, Geolocation, conference-info).
+
 ## License
 
 LGPL-2.1-or-later
