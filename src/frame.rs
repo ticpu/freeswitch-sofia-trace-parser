@@ -447,17 +447,14 @@ impl<R: Read> FrameIterator<R> {
         let finder = memmem::Finder::new(b"\x0B\n");
         let mut search_from = 0;
         loop {
-            if let Some(pos) = finder.find(&self.buf[search_from..]) {
-                let abs_pos = search_from + pos;
-                let after = abs_pos + 2;
-                if after < self.buf.len() && is_frame_header(&self.buf[after..]) {
-                    info!(skipped_bytes = after, "skipped partial first frame");
-                    return Some(after);
-                }
-                search_from = abs_pos + 2;
-            } else {
-                return None;
+            let pos = finder.find(&self.buf[search_from..])?;
+            let abs_pos = search_from + pos;
+            let after = abs_pos + 2;
+            if after < self.buf.len() && is_frame_header(&self.buf[after..]) {
+                info!(skipped_bytes = after, "skipped partial first frame");
+                return Some(after);
             }
+            search_from = abs_pos + 2;
         }
     }
 }
