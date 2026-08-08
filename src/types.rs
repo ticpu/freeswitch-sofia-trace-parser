@@ -1,5 +1,13 @@
 use std::borrow::Cow;
 use std::fmt;
+use std::net::SocketAddr;
+
+/// Frame-header address shapes, in one place for the three levels that carry
+/// one. Bracketed IPv6 and dotted IPv4 are what `mod_sofia` writes; anything
+/// else yields `None` rather than a guess.
+fn parse_socket_addr(address: &str) -> Option<SocketAddr> {
+    address.parse().ok()
+}
 
 /// Why a region of the input stream was not parsed into a frame.
 ///
@@ -254,6 +262,15 @@ pub struct Frame {
     pub content: Vec<u8>,
 }
 
+impl Frame {
+    /// The remote address as a typed [`SocketAddr`], preserving family and
+    /// port. `None` when the recorded address is not `ip:port`; the raw string
+    /// remains in [`address`](Self::address).
+    pub fn socket_addr(&self) -> Option<SocketAddr> {
+        parse_socket_addr(&self.address)
+    }
+}
+
 /// A reassembled SIP message (Level 2 output).
 ///
 /// For TCP, consecutive frames from the same connection are concatenated and
@@ -272,6 +289,15 @@ pub struct SipMessage {
     pub content: Vec<u8>,
     /// Number of Level 1 frames that were reassembled into this message.
     pub frame_count: usize,
+}
+
+impl SipMessage {
+    /// The remote address as a typed [`SocketAddr`], preserving family and
+    /// port. `None` when the recorded address is not `ip:port`; the raw string
+    /// remains in [`address`](Self::address).
+    pub fn socket_addr(&self) -> Option<SocketAddr> {
+        parse_socket_addr(&self.address)
+    }
 }
 
 /// SIP request or response first line.
@@ -411,6 +437,13 @@ impl MimePart {
 }
 
 impl ParsedSipMessage {
+    /// The remote address as a typed [`SocketAddr`], preserving family and
+    /// port. `None` when the recorded address is not `ip:port`; the raw string
+    /// remains in [`address`](Self::address).
+    pub fn socket_addr(&self) -> Option<SocketAddr> {
+        parse_socket_addr(&self.address)
+    }
+
     /// Returns the Call-ID header value. Checks both `Call-ID` and
     /// the compact form `i`.
     pub fn call_id(&self) -> Option<&str> {
@@ -511,6 +544,91 @@ mod tests {
                 .collect(),
             body: body.to_vec(),
             frame_count: 1,
+        }
+    }
+
+    fn make_frame(address: &str) -> Frame {
+        Frame {
+            direction: Direction::Recv,
+            byte_count: 0,
+            transport: Transport::Tcp,
+            address: address.into(),
+            timestamp: Timestamp::TimeOnly {
+                hour: 0,
+                min: 0,
+                sec: 0,
+                usec: 0,
+            },
+            content: Vec::new(),
+        }
+    }
+
+    fn make_message(address: &str) -> SipMessage {
+        SipMessage {
+            direction: Direction::Recv,
+            transport: Transport::Tcp,
+            address: address.into(),
+            timestamp: Timestamp::TimeOnly {
+                hour: 0,
+                min: 0,
+                sec: 0,
+                usec: 0,
+            },
+            content: Vec::new(),
+            frame_count: 1,
+        }
+    }
+
+    fn parsed_with_address(address: &str) -> ParsedSipMessage {
+        let mut msg = make_parsed(
+            SipMessageType::Request {
+                method: "OPTIONS".into(),
+                uri: "sip:host".into(),
+            },
+            vec![],
+            b"",
+        );
+        msg.address = address.into();
+        msg
+    }
+
+    #[test]
+    fn socket_addr_ipv4() {
+        let addr = make_frame("10.0.0.1:5060").socket_addr().unwrap();
+        assert!(addr.is_ipv4());
+        assert_eq!(addr.port(), 5060);
+        assert_eq!(addr.ip().to_string(), "10.0.0.1");
+    }
+
+    #[test]
+    fn socket_addr_ipv6_bracketed() {
+        let addr = make_message("[2001:db8::1]:5061").socket_addr().unwrap();
+        assert!(addr.is_ipv6());
+        assert_eq!(addr.port(), 5061);
+        assert_eq!(addr.ip().to_string(), "2001:db8::1");
+    }
+
+    #[test]
+    fn socket_addr_on_parsed_message() {
+        let addr = parsed_with_address("192.0.2.4:5080").socket_addr().unwrap();
+        assert_eq!(addr.port(), 5080);
+    }
+
+    #[test]
+    fn socket_addr_rejects_non_addresses() {
+        for bad in [
+            "345.678.987.654:5060",
+            "10.0.0.1",
+            "host.example.test:5060",
+            "2001:db8::1:5060",
+            "",
+        ] {
+            assert!(
+                make_frame(bad).socket_addr().is_none(),
+                "should not parse: {bad}"
+            );
+            assert!(make_message(bad).socket_addr().is_none());
+            assert!(parsed_with_address(bad).socket_addr().is_none());
         }
     }
 
