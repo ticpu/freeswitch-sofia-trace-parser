@@ -374,6 +374,13 @@ impl MimePart {
     pub fn content_disposition(&self) -> Option<&str> {
         self.header_value("Content-Disposition")
     }
+
+    /// Returns the Content-Transfer-Encoding header value, if present. A value
+    /// the caller does not recognize means the part's bytes are not what its
+    /// media type describes.
+    pub fn content_transfer_encoding(&self) -> Option<&str> {
+        self.header_value("Content-Transfer-Encoding")
+    }
 }
 
 impl ParsedSipMessage {

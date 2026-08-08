@@ -268,12 +268,48 @@ fn parse_headers(data: &[u8]) -> Vec<(String, String)> {
     extract_all_headers(&text)
 }
 
+fn is_multipart_type(content_type: Option<&str>) -> bool {
+    content_type
+        .map(|ct| normalize_media_type(ct).starts_with("multipart/"))
+        .unwrap_or(false)
+}
+
+/// A declared boundary that yields no parts — absent from the body, or present
+/// only as the close delimiter — is not a split: reporting it as one empty
+/// makes a body vanish from a per-part loop.
+fn split_multipart(content_type: Option<&str>, body: &[u8]) -> Option<Vec<MimePart>> {
+    let boundary = extract_boundary(content_type?)?;
+    let parts = parse_multipart_body(body, boundary);
+    (!parts.is_empty()).then_some(parts)
+}
+
 impl MimePart {
     /// Content-Type with parameters stripped and lowercased, e.g.
     /// `application/sdp` from `Application/SDP; charset=utf-8`. Use this to
     /// dispatch on the type rather than matching the raw header value.
     pub fn media_type(&self) -> Option<Cow<'_, str>> {
         self.content_type().map(normalize_media_type)
+    }
+
+    /// Returns `true` if this part's Content-Type starts with `multipart/`.
+    pub fn is_multipart(&self) -> bool {
+        is_multipart_type(self.content_type())
+    }
+
+    /// Extract the MIME boundary string from this part's Content-Type header.
+    pub fn multipart_boundary(&self) -> Option<&str> {
+        extract_boundary(self.content_type()?)
+    }
+
+    /// Split a nested multipart part into its own [`MimePart`]s.
+    /// Returns `None` when this part carries no boundary or that boundary
+    /// yields no parts — either way, keep the part's own bytes.
+    ///
+    /// Descends exactly one level: a grandchild multipart comes back as a part
+    /// with its `multipart/*` type intact, to be split by another explicit
+    /// call. Depth is the caller's decision.
+    pub fn body_parts(&self) -> Option<Vec<MimePart>> {
+        split_multipart(self.content_type(), &self.body)
     }
 }
 
@@ -287,9 +323,7 @@ impl ParsedSipMessage {
 
     /// Returns `true` if the Content-Type starts with `multipart/`.
     pub fn is_multipart(&self) -> bool {
-        self.content_type()
-            .map(|ct| ct.to_ascii_lowercase().starts_with("multipart/"))
-            .unwrap_or(false)
+        is_multipart_type(self.content_type())
     }
 
     /// Extract the MIME boundary string from the Content-Type header.
@@ -299,10 +333,57 @@ impl ParsedSipMessage {
     }
 
     /// Split a multipart body into individual [`MimePart`]s.
-    /// Returns `None` if the message is not multipart.
+    /// Returns `None` when the Content-Type carries no `boundary` parameter or
+    /// that boundary yields no parts.
     pub fn body_parts(&self) -> Option<Vec<MimePart>> {
-        let boundary = self.multipart_boundary()?;
-        Some(parse_multipart_body(&self.body, boundary))
+        split_multipart(self.content_type(), &self.body)
+    }
+
+    /// The body as parts, whatever its Content-Type: the multipart children
+    /// when it splits, otherwise a single part carrying the message's own
+    /// `Content-*` headers. Empty when there is no body.
+    ///
+    /// That single part is fabricated — a non-multipart body has no per-part
+    /// header block on the wire — so its headers are copied down from the
+    /// message under their canonical names, `Content-Length` excluded. A part
+    /// split from a real multipart body carries only what the sender wrote
+    /// there, and nothing is copied into it.
+    ///
+    /// A body that claims `multipart/*` but does not split — no boundary
+    /// parameter, or one that never appears in the body — comes back as that
+    /// one part, still typed `multipart/*`. A caller that only handles types it
+    /// recognizes then sees an unknown type rather than nothing at all.
+    ///
+    /// Descends one level only; nested multipart parts are split by calling
+    /// [`MimePart::body_parts`] on them.
+    pub fn all_body_parts(&self) -> Vec<MimePart> {
+        if self.body.is_empty() {
+            return Vec::new();
+        }
+        if let Some(parts) = self.body_parts() {
+            return parts;
+        }
+
+        let mut headers: Vec<(String, String)> = Vec::new();
+        if let Some(ct) = self.content_type() {
+            headers.push(("Content-Type".to_string(), ct.to_string()));
+        }
+        for (name, value) in &self.headers {
+            let Some(canonical) = canonical_body_header(name) else {
+                continue;
+            };
+            if headers
+                .iter()
+                .any(|(k, _)| k.eq_ignore_ascii_case(&canonical))
+            {
+                continue;
+            }
+            headers.push((canonical.into_owned(), value.clone()));
+        }
+        vec![MimePart {
+            headers,
+            body: self.body.clone(),
+        }]
     }
 
     /// Content-type-aware body text. For JSON content types (`application/json`
@@ -341,6 +422,25 @@ fn normalize_media_type(ct: &str) -> Cow<'_, str> {
     } else {
         Cow::Borrowed(base)
     }
+}
+
+/// Canonical name of a header describing the body, or `None` for one that does
+/// not. `Content-Length` is not one: it counts the message body, so it goes
+/// stale as soon as a consumer rewrites the part it would be copied onto.
+fn canonical_body_header(name: &str) -> Option<Cow<'_, str>> {
+    if name.eq_ignore_ascii_case("c") {
+        return Some(Cow::Borrowed("Content-Type"));
+    }
+    if name.eq_ignore_ascii_case("e") {
+        return Some(Cow::Borrowed("Content-Encoding"));
+    }
+    if name.eq_ignore_ascii_case("l") || name.eq_ignore_ascii_case("Content-Length") {
+        return None;
+    }
+    name.as_bytes()
+        .get(..8)
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case(b"content-"))
+        .then_some(Cow::Borrowed(name))
 }
 
 /// Returns `true` for `application/json` and any `application/*+json` subtype.
@@ -1201,8 +1301,11 @@ mod tests {
 
         let msg = make_sip_message(&content);
         let parsed = msg.parse().unwrap();
-        let parts = parsed.body_parts().unwrap();
-        assert!(parts.is_empty());
+        assert!(parsed.body_parts().is_none());
+
+        let parts = parsed.all_body_parts();
+        assert_eq!(parts.len(), 1);
+        assert_eq!(parts[0].body, b"--empty--");
     }
 
     #[test]
@@ -1314,6 +1417,328 @@ mod tests {
         let parsed = msg.parse().unwrap();
         let parts = parsed.body_parts().unwrap();
         assert_eq!(parts[0].media_type().as_deref(), Some("application/sdp"));
+    }
+
+    // --- all_body_parts tests ---
+
+    #[test]
+    fn all_body_parts_wraps_non_multipart() {
+        let body = b"v=0\r\no=- 1 1 IN IP4 10.0.0.1\r\n";
+        let mut content = Vec::new();
+        content.extend_from_slice(b"INVITE sip:host SIP/2.0\r\n");
+        content.extend_from_slice(b"Call-ID: abp-plain@host\r\n");
+        content.extend_from_slice(b"Content-Type: application/sdp\r\n");
+        content.extend_from_slice(format!("Content-Length: {}\r\n", body.len()).as_bytes());
+        content.extend_from_slice(b"\r\n");
+        content.extend_from_slice(body);
+
+        let parsed = make_sip_message(&content).parse().unwrap();
+        let parts = parsed.all_body_parts();
+        assert_eq!(parts.len(), 1);
+        assert_eq!(parts[0].media_type().as_deref(), Some("application/sdp"));
+        assert_eq!(parts[0].body, body);
+    }
+
+    #[test]
+    fn all_body_parts_matches_body_parts_for_multipart() {
+        let msg = make_multipart_invite(
+            "abp-multi",
+            &[
+                ("application/sdp", b"v=0\r\n"),
+                ("application/pidf+xml", b"<presence/>"),
+            ],
+        );
+        let parsed = msg.parse().unwrap();
+        let all = parsed.all_body_parts();
+        let split = parsed.body_parts().unwrap();
+        assert_eq!(all.len(), split.len());
+        for (a, b) in all.iter().zip(split.iter()) {
+            assert_eq!(a.headers, b.headers);
+            assert_eq!(a.body, b.body);
+        }
+    }
+
+    #[test]
+    fn all_body_parts_empty_body() {
+        let content = b"OPTIONS sip:host SIP/2.0\r\n\
+            Call-ID: abp-empty@host\r\n\
+            Content-Length: 0\r\n\
+            \r\n";
+        let parsed = make_sip_message(content).parse().unwrap();
+        assert!(parsed.all_body_parts().is_empty());
+    }
+
+    #[test]
+    fn all_body_parts_multipart_without_boundary() {
+        let body = b"--something\r\nContent-Type: application/sdp\r\n\r\nv=0\r\n";
+        let mut content = Vec::new();
+        content.extend_from_slice(b"INVITE sip:host SIP/2.0\r\n");
+        content.extend_from_slice(b"Call-ID: abp-nobnd@host\r\n");
+        content.extend_from_slice(b"Content-Type: multipart/mixed\r\n");
+        content.extend_from_slice(format!("Content-Length: {}\r\n", body.len()).as_bytes());
+        content.extend_from_slice(b"\r\n");
+        content.extend_from_slice(body);
+
+        let parsed = make_sip_message(&content).parse().unwrap();
+        let parts = parsed.all_body_parts();
+        assert_eq!(
+            parts.len(),
+            1,
+            "unsplittable multipart must surface as one part"
+        );
+        assert_eq!(parts[0].media_type().as_deref(), Some("multipart/mixed"));
+        assert_eq!(parts[0].body, body);
+    }
+
+    #[test]
+    fn all_body_parts_boundary_not_in_body() {
+        let body = b"--other\r\nContent-Type: application/sdp\r\n\r\nv=0\r\n--other--";
+        let parsed = parsed_with_headers(
+            "abp-mismatch",
+            &["Content-Type: multipart/mixed;boundary=declared"],
+            body,
+        );
+        let parts = parsed.all_body_parts();
+        assert_eq!(
+            parts.len(),
+            1,
+            "a boundary absent from the body is not a split"
+        );
+        assert_eq!(parts[0].media_type().as_deref(), Some("multipart/mixed"));
+        assert_eq!(parts[0].body, body);
+        assert!(parsed.body_parts().is_none());
+    }
+
+    #[test]
+    fn all_body_parts_truncated_multipart() {
+        let body = b"--trunc\r\nContent-Type: application/sdp\r\n\r\nv=0\r\n";
+        let parsed = parsed_with_headers(
+            "abp-trunc",
+            &["Content-Type: multipart/mixed;boundary=trunc"],
+            body,
+        );
+        let parts = parsed.all_body_parts();
+        assert_eq!(
+            parts.len(),
+            1,
+            "a body cut off before the closing delimiter must not vanish"
+        );
+        assert_eq!(parts[0].body, body);
+    }
+
+    // --- content headers copied onto the synthetic part ---
+
+    fn parsed_with_headers(call_id: &str, headers: &[&str], body: &[u8]) -> ParsedSipMessage {
+        let mut content = Vec::new();
+        content.extend_from_slice(b"INVITE sip:host SIP/2.0\r\n");
+        content.extend_from_slice(format!("Call-ID: {call_id}@host\r\n").as_bytes());
+        for header in headers {
+            content.extend_from_slice(header.as_bytes());
+            content.extend_from_slice(b"\r\n");
+        }
+        content.extend_from_slice(format!("Content-Length: {}\r\n", body.len()).as_bytes());
+        content.extend_from_slice(b"\r\n");
+        content.extend_from_slice(body);
+        make_sip_message(&content).parse().unwrap()
+    }
+
+    fn part_header<'a>(part: &'a MimePart, name: &str) -> Option<&'a str> {
+        part.headers
+            .iter()
+            .find(|(k, _)| k.eq_ignore_ascii_case(name))
+            .map(|(_, v)| v.as_str())
+    }
+
+    #[test]
+    fn synthetic_part_carries_transfer_encoding() {
+        let parsed = parsed_with_headers(
+            "abp-cte",
+            &[
+                "Content-Type: application/pidf+xml",
+                "Content-Transfer-Encoding: base64",
+            ],
+            b"PD94bWwgdmVyc2lvbj0iMS4wIj8+",
+        );
+        let parts = parsed.all_body_parts();
+        assert_eq!(
+            parts[0].content_transfer_encoding(),
+            Some("base64"),
+            "a per-part consumer must see the encoding the message declared"
+        );
+    }
+
+    #[test]
+    fn synthetic_part_carries_disposition_and_id() {
+        let parsed = parsed_with_headers(
+            "abp-cd",
+            &[
+                "Content-Type: application/sdp",
+                "Content-Disposition: session",
+                "Content-ID: <sdp@host>",
+            ],
+            b"v=0\r\n",
+        );
+        let parts = parsed.all_body_parts();
+        assert_eq!(parts[0].content_disposition(), Some("session"));
+        assert_eq!(parts[0].content_id(), Some("<sdp@host>"));
+    }
+
+    #[test]
+    fn synthetic_part_canonicalizes_compact_content_encoding() {
+        let parsed = parsed_with_headers(
+            "abp-compact-e",
+            &["Content-Type: application/sdp", "e: gzip"],
+            b"v=0\r\n",
+        );
+        let parts = parsed.all_body_parts();
+        assert_eq!(
+            part_header(&parts[0], "Content-Encoding"),
+            Some("gzip"),
+            "compact form must arrive under the canonical name"
+        );
+    }
+
+    #[test]
+    fn synthetic_part_canonicalizes_compact_content_type() {
+        let parsed = parsed_with_headers("abp-compact-c", &["c: application/sdp"], b"v=0\r\n");
+        let parts = parsed.all_body_parts();
+        assert_eq!(parts[0].media_type().as_deref(), Some("application/sdp"));
+        assert_eq!(
+            parts[0]
+                .headers
+                .iter()
+                .filter(|(k, _)| k.eq_ignore_ascii_case("Content-Type"))
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn synthetic_part_content_type_matches_the_message() {
+        let parsed = parsed_with_headers(
+            "abp-both-ct",
+            &["c: text/plain", "Content-Type: application/sdp"],
+            b"v=0\r\n",
+        );
+        let parts = parsed.all_body_parts();
+        assert_eq!(parts[0].content_type(), parsed.content_type());
+        assert_eq!(
+            parts[0]
+                .headers
+                .iter()
+                .filter(|(k, _)| k.eq_ignore_ascii_case("Content-Type"))
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn synthetic_part_omits_content_length() {
+        let parsed = parsed_with_headers("abp-len", &["Content-Type: application/sdp"], b"v=0\r\n");
+        let parts = parsed.all_body_parts();
+        assert_eq!(part_header(&parts[0], "Content-Length"), None);
+        assert_eq!(part_header(&parts[0], "l"), None);
+    }
+
+    #[test]
+    fn synthetic_part_copies_only_content_headers() {
+        let parsed = parsed_with_headers(
+            "abp-other",
+            &[
+                "Content-Type: application/sdp",
+                "Subject: not a body header",
+            ],
+            b"v=0\r\n",
+        );
+        let parts = parsed.all_body_parts();
+        assert_eq!(part_header(&parts[0], "Subject"), None);
+        assert_eq!(part_header(&parts[0], "Call-ID"), None);
+    }
+
+    #[test]
+    fn wire_parts_get_no_fabricated_headers() {
+        let msg = make_multipart_invite("wire-hdrs", &[("application/sdp", b"v=0\r\n")]);
+        let mut content = msg.content.clone();
+        let insert_at = CRLF.find(&content).unwrap() + 2;
+        content.splice(
+            insert_at..insert_at,
+            b"Content-Transfer-Encoding: base64\r\n".iter().copied(),
+        );
+        let parsed = make_sip_message(&content).parse().unwrap();
+        let parts = parsed.all_body_parts();
+        assert_eq!(parts.len(), 1);
+        assert_eq!(
+            parts[0].content_transfer_encoding(),
+            None,
+            "a wire part carries what the sender wrote, nothing copied down"
+        );
+    }
+
+    // --- nested multipart (caller-driven descent) ---
+
+    /// INVITE whose body is a multipart carrying SDP beside a nested
+    /// multipart/mixed that holds the PIDF-LO.
+    fn make_nested_multipart_invite() -> SipMessage {
+        let mut inner = Vec::new();
+        inner.extend_from_slice(b"--inner\r\n");
+        inner.extend_from_slice(b"Content-Type: application/pidf+xml\r\n\r\n");
+        inner.extend_from_slice(b"<presence/>");
+        inner.extend_from_slice(b"\r\n--inner--");
+
+        let mut body = Vec::new();
+        body.extend_from_slice(b"--outer\r\n");
+        body.extend_from_slice(b"Content-Type: application/sdp\r\n\r\n");
+        body.extend_from_slice(b"v=0\r\n");
+        body.extend_from_slice(b"\r\n--outer\r\n");
+        body.extend_from_slice(b"Content-Type: multipart/mixed;boundary=inner\r\n\r\n");
+        body.extend_from_slice(&inner);
+        body.extend_from_slice(b"\r\n--outer--");
+
+        let mut content = Vec::new();
+        content.extend_from_slice(b"INVITE sip:host SIP/2.0\r\n");
+        content.extend_from_slice(b"Call-ID: nested@host\r\n");
+        content.extend_from_slice(b"Content-Type: multipart/mixed;boundary=outer\r\n");
+        content.extend_from_slice(format!("Content-Length: {}\r\n", body.len()).as_bytes());
+        content.extend_from_slice(b"\r\n");
+        content.extend_from_slice(&body);
+
+        make_sip_message(&content)
+    }
+
+    #[test]
+    fn nested_multipart_not_flattened() {
+        let parsed = make_nested_multipart_invite().parse().unwrap();
+        let parts = parsed.all_body_parts();
+        assert_eq!(parts.len(), 2);
+        assert_eq!(parts[0].media_type().as_deref(), Some("application/sdp"));
+        assert_eq!(parts[1].media_type().as_deref(), Some("multipart/mixed"));
+    }
+
+    #[test]
+    fn nested_multipart_explicit_descent() {
+        let parsed = make_nested_multipart_invite().parse().unwrap();
+        let outer = parsed.all_body_parts();
+        let nested = &outer[1];
+
+        assert!(nested.is_multipart());
+        assert_eq!(nested.multipart_boundary(), Some("inner"));
+
+        let inner = nested.body_parts().unwrap();
+        assert_eq!(inner.len(), 1);
+        assert_eq!(
+            inner[0].media_type().as_deref(),
+            Some("application/pidf+xml")
+        );
+        assert_eq!(inner[0].body, b"<presence/>");
+    }
+
+    #[test]
+    fn non_multipart_part_has_no_children() {
+        let parsed = make_nested_multipart_invite().parse().unwrap();
+        let sdp_part = &parsed.all_body_parts()[0];
+        assert!(!sdp_part.is_multipart());
+        assert!(sdp_part.multipart_boundary().is_none());
+        assert!(sdp_part.body_parts().is_none());
     }
 
     // --- is_json_content_type tests ---
