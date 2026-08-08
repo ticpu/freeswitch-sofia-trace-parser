@@ -243,6 +243,11 @@ JSON detection matches `application/json` and any `application/*+json`
 subtype, case-insensitive, ignoring media type parameters like
 `charset=utf-8`.
 
+`message/sipfrag` parts get a dedicated fragment parser: RFC 3420
+fragments may lack a start line or a trailing CRLF, so they cannot
+round-trip through the full-message parse, and treating them as opaque
+text would hide the headers they legally carry.
+
 ## GrepFilter: Handling Piped Input
 
 A common workflow is `grep -C5 'Call-ID.*abc123' profile.dump | parser`.
@@ -315,6 +320,28 @@ extracting location data (PIDF-LO XML) separately from session
 description (SDP), and no SIP library we found handled FreeSWITCH's
 dump format.
 
+Body access is uniform: every message yields its body as parts. A body
+that does not split — not multipart, or multipart whose declared boundary
+never appears in it — comes back as one part typed with the message's own
+Content-Type, so no body is silently absent from a per-part loop.
+Downstream redaction dispatches per part; a second code path for plain
+bodies is a second place to forget a media type, and an unknown type has
+to surface as a part for a fail-closed consumer to withhold it.
+
+That fabricated part carries the message's `Content-*` headers under
+their canonical names, less `Content-Length`, which counts the message
+body and goes stale once a consumer rewrites the part. Nothing in a
+per-part loop tells a fabricated part from a wire one, so a transfer
+encoding visible on only one kind leaves redaction reading encoded bytes
+as text.
+
+Splitting is one level per call and never recursive on the library's
+side: a nested `multipart/*` part surfaces intact with its media type,
+and a caller that wants its children asks explicitly. Depth stays a
+caller decision, so a malformed boundary — which can false-match inside
+binary content and fabricate structure — only does so where a caller
+chose to descend.
+
 ## Pcap on Demand from Text Traces
 
 FreeSWITCH dumps are text traces of decrypted SIP. The natural workflow for an
@@ -359,6 +386,14 @@ major-version bump would become a semver break.
 
 The module is behind a `pcap` feature flag. Library consumers that only
 need parsing pay nothing for it; the CLI enables it transitively.
+
+## Typed Remote Address
+
+Which shapes the frame header's remote address takes (bracketed IPv6,
+numeric-only hosts) is Level 1 knowledge, so the typed accessor lives
+here instead of every consumer re-learning mod_sofia's forms. Anything
+that isn't `ip:port` yields `None` rather than a guess; the raw string
+remains available.
 
 ## Error Recovery at Frame Boundaries
 
