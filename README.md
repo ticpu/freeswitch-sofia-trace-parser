@@ -67,7 +67,15 @@ for result in ParsedMessageIterator::new(file) {
 }
 ```
 
+`socket_addr()` gives the remote address typed, family and port preserved, on
+`Frame`, `SipMessage` and `ParsedSipMessage` alike.
+
 ### Multipart body splitting (SDP + EIDO/PIDF)
+
+`body_parts()` returns `None` for a body that does not split. Use
+`all_body_parts()` to handle every body the same way: it yields the multipart
+children, or a single part for a body that has none. `media_type()` gives the
+type with parameters stripped and lowercased, ready to match on.
 
 ```rust
 use std::fs::File;
@@ -76,15 +84,37 @@ use freeswitch_sofia_trace_parser::ParsedMessageIterator;
 let file = File::open("profile.dump")?;
 for result in ParsedMessageIterator::new(file) {
     let msg = result?;
-    if let Some(parts) = msg.body_parts() {
-        for part in &parts {
-            println!("  part: {} ({} bytes)",
-                part.content_type().unwrap_or("(none)"),
-                part.body.len());
+    for part in msg.all_body_parts() {
+        match part.media_type().as_deref() {
+            Some("application/sdp") => println!("  SDP ({} bytes)", part.body.len()),
+            Some("application/pidf+xml") => println!("  location"),
+            Some("message/sipfrag") => {
+                let frag = part.parse_sipfrag()?;
+                println!("  fragment: {:?}", frag.message_type);
+            }
+            other => println!("  unhandled: {}", other.unwrap_or("(none)")),
         }
     }
 }
 ```
+
+A part split from a multipart body carries the headers the sender wrote between
+the boundary and the blank line, whatever they are. The single part for a body
+that does not split has no such block on the wire, so `all_body_parts()`
+fabricates one: the body verbatim, and the message's `Content-*` headers copied
+down under their canonical names — compact `c`/`e` resolved, `Content-Length`
+left off because it counts the message body and stops describing the part once
+you rewrite it. So `part.content_transfer_encoding()` answers the same on both
+kinds, and a loop that dispatches on `media_type()` cannot mistake an encoded
+body for the text its type claims.
+
+A body typed `multipart/*` that carries no `boundary` parameter, or one the body
+never uses, is a body that does not split: it comes back as that single part,
+still typed `multipart/*`, rather than as nothing at all.
+
+Splitting descends one level. A nested `multipart/*` comes back as a part with
+its type intact; call `part.body_parts()` on it to go deeper — the depth is
+yours to choose.
 
 ### Content-type-aware body access
 
@@ -190,6 +220,8 @@ for frame in FrameIterator::new(chain) {
 - Non-UTF-8 content (works on `&[u8]`)
 - EOF without trailing `\x0B\n`
 - Multipart MIME bodies (SDP + PIDF/EIDO splitting for NG-911)
+- Nested multipart parts (split on request, one level per call)
+- `message/sipfrag` bodies without a start line or trailing CRLF (RFC 3420)
 - JSON body unescaping for `application/json` and `application/*+json` content types
 - TLS keep-alive whitespace (RFC 5626 CRLF probes, sofia-sip bare `\n`)
 - Logrotate replay detection (partial frame re-written at start of new file)
