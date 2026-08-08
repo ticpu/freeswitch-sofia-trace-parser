@@ -7,7 +7,7 @@ use sip_header::extract_all_headers;
 use crate::frame::ParseError;
 use crate::message::MessageIterator;
 use crate::types::{
-    MimePart, ParseStats, ParsedSipMessage, SipMessage, SipMessageType, SkipTracking,
+    MimePart, ParseStats, ParsedSipMessage, SipFragment, SipMessage, SipMessageType, SkipTracking,
     UnparsedRegion,
 };
 
@@ -268,6 +268,47 @@ fn parse_headers(data: &[u8]) -> Vec<(String, String)> {
     extract_all_headers(&text)
 }
 
+/// Parse a `message/sipfrag` body (RFC 3420) — any prefix of a SIP message.
+///
+/// The start line is optional: a fragment that begins with a header is parsed
+/// from the headers down. The trailing CRLF is optional too, so a bare status
+/// line parses. Fails only when the first line is neither a start line nor a
+/// header, or the input is empty.
+pub fn parse_sipfrag(data: &[u8]) -> Result<SipFragment, ParseError> {
+    if data.is_empty() {
+        return Err(ParseError::InvalidMessage("empty sipfrag".into()));
+    }
+
+    let first_line_end = CRLF.find(data).unwrap_or(data.len());
+    let first_line = &data[..first_line_end];
+
+    let (message_type, headers_start) = match parse_first_line(first_line) {
+        Ok(mt) => (Some(mt), (first_line_end + 2).min(data.len())),
+        Err(_) => {
+            if memchr::memchr(b':', first_line).is_none() {
+                return Err(ParseError::InvalidMessage(format!(
+                    "first line is neither a start line nor a header: {:?}",
+                    String::from_utf8_lossy(first_line)
+                )));
+            }
+            (None, 0)
+        }
+    };
+
+    let (header_bytes, body) = match CRLFCRLF.find(data) {
+        Some(pos) if pos >= headers_start => (&data[headers_start..pos], &data[pos + 4..]),
+        // The blank line terminates the start line: no headers, body follows.
+        Some(pos) => (&[][..], &data[pos + 4..]),
+        None => (&data[headers_start..], &[][..]),
+    };
+
+    Ok(SipFragment {
+        message_type,
+        headers: parse_headers(header_bytes),
+        body: body.to_vec(),
+    })
+}
+
 fn is_multipart_type(content_type: Option<&str>) -> bool {
     content_type
         .map(|ct| normalize_media_type(ct).starts_with("multipart/"))
@@ -299,6 +340,14 @@ impl MimePart {
     /// Extract the MIME boundary string from this part's Content-Type header.
     pub fn multipart_boundary(&self) -> Option<&str> {
         extract_boundary(self.content_type()?)
+    }
+
+    /// Parse this part's body as a `message/sipfrag` (RFC 3420).
+    ///
+    /// Does not check the Content-Type: dispatch on [`media_type`](Self::media_type)
+    /// first, then call this for the parts that claim to be fragments.
+    pub fn parse_sipfrag(&self) -> Result<SipFragment, ParseError> {
+        parse_sipfrag(&self.body)
     }
 
     /// Split a nested multipart part into its own [`MimePart`]s.
@@ -1739,6 +1788,115 @@ mod tests {
         assert!(!sdp_part.is_multipart());
         assert!(sdp_part.multipart_boundary().is_none());
         assert!(sdp_part.body_parts().is_none());
+    }
+
+    // --- sipfrag tests ---
+
+    #[test]
+    fn sipfrag_status_line_with_crlf() {
+        let frag = parse_sipfrag(b"SIP/2.0 200 OK\r\n").unwrap();
+        assert_eq!(
+            frag.message_type,
+            Some(SipMessageType::Response {
+                code: 200,
+                reason: "OK".into()
+            })
+        );
+        assert!(frag.headers.is_empty());
+        assert!(frag.body.is_empty());
+    }
+
+    #[test]
+    fn sipfrag_status_line_without_trailing_crlf() {
+        let frag = parse_sipfrag(b"SIP/2.0 183 Session Progress").unwrap();
+        assert_eq!(
+            frag.message_type,
+            Some(SipMessageType::Response {
+                code: 183,
+                reason: "Session Progress".into()
+            })
+        );
+    }
+
+    #[test]
+    fn sipfrag_headers_only() {
+        let frag = parse_sipfrag(b"To: <sip:user@host>\r\nCSeq: 1 INVITE\r\n").unwrap();
+        assert_eq!(frag.message_type, None);
+        assert_eq!(frag.headers.len(), 2);
+        assert_eq!(frag.headers[0].0, "To");
+        assert_eq!(frag.headers[0].1, "<sip:user@host>");
+        assert_eq!(frag.headers[1].1, "1 INVITE");
+    }
+
+    #[test]
+    fn sipfrag_header_value_is_case_insensitive() {
+        let frag = parse_sipfrag(b"To: <sip:user@host>\r\nCSeq: 1 INVITE\r\n").unwrap();
+        assert_eq!(frag.header_value("cseq"), Some("1 INVITE"));
+        assert_eq!(frag.header_value("To"), Some("<sip:user@host>"));
+        assert_eq!(frag.header_value("Call-ID"), None);
+    }
+
+    #[test]
+    fn sipfrag_headers_only_without_trailing_crlf() {
+        let frag = parse_sipfrag(b"To: <sip:user@host>").unwrap();
+        assert_eq!(frag.message_type, None);
+        assert_eq!(frag.headers.len(), 1);
+        assert_eq!(frag.headers[0].1, "<sip:user@host>");
+    }
+
+    #[test]
+    fn sipfrag_start_line_headers_and_body() {
+        let data = b"SIP/2.0 200 OK\r\n\
+            Content-Type: application/sdp\r\n\
+            \r\n\
+            v=0\r\n";
+        let frag = parse_sipfrag(data).unwrap();
+        assert_eq!(
+            frag.message_type,
+            Some(SipMessageType::Response {
+                code: 200,
+                reason: "OK".into()
+            })
+        );
+        assert_eq!(frag.headers.len(), 1);
+        assert_eq!(frag.body, b"v=0\r\n");
+    }
+
+    #[test]
+    fn sipfrag_request_start_line() {
+        let frag = parse_sipfrag(b"INVITE sip:user@host SIP/2.0\r\nCSeq: 2 INVITE\r\n").unwrap();
+        assert_eq!(
+            frag.message_type,
+            Some(SipMessageType::Request {
+                method: "INVITE".into(),
+                uri: "sip:user@host".into()
+            })
+        );
+        assert_eq!(frag.headers.len(), 1);
+    }
+
+    #[test]
+    fn sipfrag_garbage_is_error() {
+        assert!(parse_sipfrag(b"just some text without a colon").is_err());
+        assert!(parse_sipfrag(b"").is_err());
+    }
+
+    #[test]
+    fn sipfrag_from_mime_part() {
+        let body = b"SIP/2.0 100 Trying\r\n";
+        let msg = make_multipart_invite("frag-boundary", &[("message/sipfrag", body)]);
+        let parsed = msg.parse().unwrap();
+        let parts = parsed.all_body_parts();
+        assert_eq!(parts[0].media_type().as_deref(), Some("message/sipfrag"));
+
+        let frag = parts[0].parse_sipfrag().unwrap();
+        assert_eq!(
+            frag.message_type,
+            Some(SipMessageType::Response {
+                code: 100,
+                reason: "Trying".into()
+            })
+        );
     }
 
     // --- is_json_content_type tests ---

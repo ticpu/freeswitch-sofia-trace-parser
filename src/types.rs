@@ -339,6 +339,33 @@ pub struct ParsedSipMessage {
     pub frame_count: usize,
 }
 
+/// A `message/sipfrag` body (RFC 3420): any prefix of a SIP message.
+///
+/// Unlike [`ParsedSipMessage`], every element is optional — a fragment may
+/// carry a start line, headers, a body, or any combination, and needs no
+/// trailing CRLF. It has no transport metadata of its own; that belongs to
+/// the message carrying it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SipFragment {
+    /// Request or status line, when the fragment begins with one.
+    pub message_type: Option<SipMessageType>,
+    /// Headers in wire order as `(name, value)` pairs.
+    pub headers: Vec<(String, String)>,
+    /// Body bytes after the `\r\n\r\n` terminator, empty when absent.
+    pub body: Vec<u8>,
+}
+
+impl SipFragment {
+    /// Case-insensitive header lookup, first match in wire order. Compact forms
+    /// are not resolved: ask for the name the fragment is expected to carry.
+    pub fn header_value(&self, name: &str) -> Option<&str> {
+        self.headers
+            .iter()
+            .find(|(k, _)| k.eq_ignore_ascii_case(name))
+            .map(|(_, v)| v.as_str())
+    }
+}
+
 /// A single part from a multipart MIME body.
 #[derive(Debug, Clone)]
 pub struct MimePart {
