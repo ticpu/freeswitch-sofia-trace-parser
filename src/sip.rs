@@ -268,7 +268,23 @@ fn parse_headers(data: &[u8]) -> Vec<(String, String)> {
     extract_all_headers(&text)
 }
 
+impl MimePart {
+    /// Content-Type with parameters stripped and lowercased, e.g.
+    /// `application/sdp` from `Application/SDP; charset=utf-8`. Use this to
+    /// dispatch on the type rather than matching the raw header value.
+    pub fn media_type(&self) -> Option<Cow<'_, str>> {
+        self.content_type().map(normalize_media_type)
+    }
+}
+
 impl ParsedSipMessage {
+    /// Content-Type with parameters stripped and lowercased, e.g.
+    /// `multipart/mixed` from `multipart/mixed;boundary=abc`. Use this to
+    /// dispatch on the type rather than matching the raw header value.
+    pub fn media_type(&self) -> Option<Cow<'_, str>> {
+        self.content_type().map(normalize_media_type)
+    }
+
     /// Returns `true` if the Content-Type starts with `multipart/`.
     pub fn is_multipart(&self) -> bool {
         self.content_type()
@@ -316,10 +332,23 @@ impl ParsedSipMessage {
     }
 }
 
-fn is_json_content_type(ct: &str) -> bool {
-    let media_type = ct.split(';').next().unwrap_or("").trim();
-    let lower = media_type.to_ascii_lowercase();
-    lower == "application/json" || (lower.starts_with("application/") && lower.ends_with("+json"))
+/// Strip parameters from a Content-Type value and normalize to lowercase.
+/// Borrows when the type/subtype is already lowercase and unpadded.
+fn normalize_media_type(ct: &str) -> Cow<'_, str> {
+    let base = ct.split(';').next().unwrap_or("").trim();
+    if base.bytes().any(|b| b.is_ascii_uppercase()) {
+        Cow::Owned(base.to_ascii_lowercase())
+    } else {
+        Cow::Borrowed(base)
+    }
+}
+
+/// Returns `true` for `application/json` and any `application/*+json` subtype.
+/// Case-insensitive; media type parameters are ignored.
+pub fn is_json_content_type(ct: &str) -> bool {
+    let media_type = normalize_media_type(ct);
+    media_type == "application/json"
+        || (media_type.starts_with("application/") && media_type.ends_with("+json"))
 }
 
 fn unescape_json_body(input: &[u8]) -> String {
@@ -1237,6 +1266,54 @@ mod tests {
         assert!(parts[0].content_type().is_none());
         assert!(parts[0].headers.is_empty());
         assert_eq!(parts[0].body, raw_body);
+    }
+
+    // --- media_type tests ---
+
+    fn make_with_content_type(header: &str) -> ParsedSipMessage {
+        let content = format!("INVITE sip:host SIP/2.0\r\n{header}\r\nCall-ID: mt@host\r\n\r\n");
+        make_sip_message(content.as_bytes()).parse().unwrap()
+    }
+
+    #[test]
+    fn media_type_strips_parameters() {
+        let parsed = make_with_content_type("Content-Type: multipart/mixed;boundary=abc");
+        assert_eq!(parsed.media_type().as_deref(), Some("multipart/mixed"));
+    }
+
+    #[test]
+    fn media_type_lowercases() {
+        let parsed = make_with_content_type("Content-Type: Application/SDP");
+        assert_eq!(parsed.media_type().as_deref(), Some("application/sdp"));
+    }
+
+    #[test]
+    fn media_type_trims_whitespace() {
+        let parsed = make_with_content_type("Content-Type: application/sdp ; charset=utf-8");
+        assert_eq!(parsed.media_type().as_deref(), Some("application/sdp"));
+    }
+
+    #[test]
+    fn media_type_compact_form() {
+        let parsed = make_with_content_type("c: application/pidf+xml");
+        assert_eq!(parsed.media_type().as_deref(), Some("application/pidf+xml"));
+    }
+
+    #[test]
+    fn media_type_absent() {
+        let parsed = make_with_content_type("Subject: none");
+        assert_eq!(parsed.media_type(), None);
+    }
+
+    #[test]
+    fn media_type_on_mime_part() {
+        let msg = make_multipart_invite(
+            "mt-boundary",
+            &[("Application/SDP; charset=utf-8", b"v=0\r\n")],
+        );
+        let parsed = msg.parse().unwrap();
+        let parts = parsed.body_parts().unwrap();
+        assert_eq!(parts[0].media_type().as_deref(), Some("application/sdp"));
     }
 
     // --- is_json_content_type tests ---

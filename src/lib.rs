@@ -65,5 +65,5 @@ pub use grep::GrepFilter;
 pub use message::MessageIterator;
 #[cfg(feature = "pcap")]
 pub use pcap::{PcapConfig, PcapError, PcapLayer, PcapWriter};
-pub use sip::ParsedMessageIterator;
+pub use sip::{is_json_content_type, ParsedMessageIterator};
 pub use types::*;
