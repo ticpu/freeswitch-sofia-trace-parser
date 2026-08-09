@@ -2,11 +2,14 @@ use std::borrow::Cow;
 use std::fmt;
 use std::net::SocketAddr;
 
-/// Frame-header address shapes, in one place for the three levels that carry
-/// one. Bracketed IPv6 and dotted IPv4 are what `mod_sofia` writes; anything
-/// else yields `None` rather than a guess.
+/// mod_sofia brackets IPv4 like IPv6 (`[198.51.100.7]:5060`); anything that
+/// isn't an ip:port shape yields `None` rather than a guess.
 fn parse_socket_addr(address: &str) -> Option<SocketAddr> {
-    address.parse().ok()
+    if let Ok(addr) = address.parse() {
+        return Some(addr);
+    }
+    let (ip, port) = address.strip_prefix('[')?.split_once("]:")?;
+    Some(SocketAddr::new(ip.parse().ok()?, port.parse().ok()?))
 }
 
 /// Why a region of the input stream was not parsed into a frame.
