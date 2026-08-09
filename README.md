@@ -70,10 +70,16 @@ for result in ParsedMessageIterator::new(file) {
 `socket_addr()` gives the remote address typed, family and port preserved, on
 `Frame`, `SipMessage` and `ParsedSipMessage` alike.
 
+Headers live in a `Headers` newtype over `(name, value)` pairs in wire order —
+it derefs to the slice for iteration, and `header_value(name)` on
+`ParsedSipMessage`, `MimePart` and `SipFragment` is the case-insensitive
+lookup. Typed accessors (`call_id()`, `content_type()`, …) resolve SIP compact
+forms; `header_value()` does not.
+
 ### Multipart body splitting (SDP + EIDO/PIDF)
 
 `body_parts()` returns `None` for a body that does not split. Use
-`all_body_parts()` to handle every body the same way: it yields the multipart
+`body_as_parts()` to handle every body the same way: it yields the multipart
 children, or a single part for a body that has none. `media_type()` gives the
 type with parameters stripped and lowercased, ready to match on.
 
@@ -84,7 +90,7 @@ use freeswitch_sofia_trace_parser::ParsedMessageIterator;
 let file = File::open("profile.dump")?;
 for result in ParsedMessageIterator::new(file) {
     let msg = result?;
-    for part in msg.all_body_parts() {
+    for part in msg.body_as_parts() {
         match part.media_type().as_deref() {
             Some("application/sdp") => println!("  SDP ({} bytes)", part.body.len()),
             Some("application/pidf+xml") => println!("  location"),
@@ -100,9 +106,9 @@ for result in ParsedMessageIterator::new(file) {
 
 A part split from a multipart body carries the headers the sender wrote between
 the boundary and the blank line, whatever they are. The single part for a body
-that does not split has no such block on the wire, so `all_body_parts()`
+that does not split has no such block on the wire, so `body_as_parts()`
 fabricates one: the body verbatim, and the message's `Content-*` headers copied
-down under their canonical names — compact `c`/`e` resolved, `Content-Length`
+down — compact `c`/`e` expanded to their full names, `Content-Length`
 left off because it counts the message body and stops describing the part once
 you rewrite it. So `part.content_transfer_encoding()` answers the same on both
 kinds, and a loop that dispatches on `media_type()` cannot mistake an encoded

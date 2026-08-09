@@ -321,9 +321,8 @@ fn is_multipart_type(content_type: Option<&str>) -> bool {
         .unwrap_or(false)
 }
 
-/// A declared boundary that yields no parts — absent from the body, or present
-/// only as the close delimiter — is not a split: reporting it as one empty
-/// makes a body vanish from a per-part loop.
+/// A declared boundary that yields no parts is not a split: reporting it as
+/// one empty makes a body vanish from a per-part loop.
 fn split_multipart(content_type: Option<&str>, body: &[u8]) -> Option<Vec<MimePart>> {
     let boundary = extract_boundary(content_type?)?;
     let parts = parse_multipart_body(body, boundary);
@@ -408,7 +407,7 @@ impl ParsedSipMessage {
     ///
     /// That single part is fabricated — a non-multipart body has no per-part
     /// header block on the wire — so its headers are copied down from the
-    /// message under their canonical names, `Content-Length` excluded. A part
+    /// message, compact forms expanded, `Content-Length` excluded. A part
     /// split from a real multipart body carries only what the sender wrote
     /// there, and nothing is copied into it.
     ///
@@ -487,9 +486,8 @@ fn normalize_media_type(ct: &str) -> Cow<'_, str> {
     }
 }
 
-/// Canonical name of a header describing the body, or `None` for one that does
-/// not. `Content-Length` is not one: it counts the message body, so it goes
-/// stale as soon as a consumer rewrites the part it would be copied onto.
+/// Canonical name of a body-describing header, `None` otherwise. Excludes
+/// `Content-Length`: it goes stale once a consumer rewrites the part.
 fn canonical_body_header(name: &str) -> Option<&str> {
     if name.eq_ignore_ascii_case("c") {
         return Some("Content-Type");

@@ -39,7 +39,7 @@ cargo test --release --test level3_samples    # Level 3 integration tests (requi
 Before tagging a release:
 
 ```sh
-cargo semver-checks --baseline-rev <previous-tag> --default-features=false
+cargo semver-checks --baseline-rev <previous-tag> --only-explicit-features
 cargo clippy --release -- -D warnings
 cargo test --release
 cargo build --release
