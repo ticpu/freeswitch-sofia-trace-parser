@@ -159,26 +159,8 @@ fn parse_sip_content(msg: &SipMessage, content: &[u8]) -> Result<ParsedSipMessag
 
     let message_type = parse_first_line(first_line)?;
 
-    // Find end of headers
-    let header_end = CRLFCRLF.find(content);
-    let (headers, body) = match header_end {
-        Some(pos) if pos > first_line_end + 1 => {
-            let header_bytes = &content[first_line_end + 2..pos];
-            let body = &content[pos + 4..];
-            (header_bytes, body)
-        }
-        Some(pos) => {
-            let body = &content[pos + 4..];
-            (&[][..], body)
-        }
-        None => {
-            // No blank line — entire content after first line is headers, no body
-            let header_bytes = &content[first_line_end + 2..];
-            (header_bytes, &[][..])
-        }
-    };
-
-    let headers = parse_headers(headers);
+    let (header_bytes, body) = split_headers_body(content, first_line_end + 2);
+    let headers = parse_headers(header_bytes);
 
     Ok(ParsedSipMessage {
         direction: msg.direction,
@@ -281,6 +263,17 @@ fn parse_headers(data: &[u8]) -> Headers {
     Headers(extract_all_headers(&text))
 }
 
+/// Split at the `\r\n\r\n` header terminator. A terminator before
+/// `headers_start` means the blank line terminates the start line: no headers,
+/// body follows. No terminator means headers run to the end, no body.
+fn split_headers_body(data: &[u8], headers_start: usize) -> (&[u8], &[u8]) {
+    match CRLFCRLF.find(data) {
+        Some(pos) if pos >= headers_start => (&data[headers_start..pos], &data[pos + 4..]),
+        Some(pos) => (&[][..], &data[pos + 4..]),
+        None => (&data[headers_start.min(data.len())..], &[][..]),
+    }
+}
+
 /// Parse a `message/sipfrag` body (RFC 3420) — any prefix of a SIP message.
 ///
 /// The start line is optional: a fragment that begins with a header is parsed
@@ -313,12 +306,7 @@ pub fn parse_sipfrag(data: &[u8]) -> Result<SipFragment, ParseError> {
         }
     };
 
-    let (header_bytes, body) = match CRLFCRLF.find(data) {
-        Some(pos) if pos >= headers_start => (&data[headers_start..pos], &data[pos + 4..]),
-        // The blank line terminates the start line: no headers, body follows.
-        Some(pos) => (&[][..], &data[pos + 4..]),
-        None => (&data[headers_start..], &[][..]),
-    };
+    let (header_bytes, body) = split_headers_body(data, headers_start);
 
     Ok(SipFragment {
         message_type,
@@ -449,11 +437,11 @@ impl ParsedSipMessage {
             };
             if headers
                 .iter()
-                .any(|(k, _)| k.eq_ignore_ascii_case(&canonical))
+                .any(|(k, _)| k.eq_ignore_ascii_case(canonical))
             {
                 continue;
             }
-            headers.push((canonical.into_owned(), value.clone()));
+            headers.push((canonical.to_string(), value.clone()));
         }
         vec![MimePart {
             headers: Headers(headers),
@@ -502,12 +490,12 @@ fn normalize_media_type(ct: &str) -> Cow<'_, str> {
 /// Canonical name of a header describing the body, or `None` for one that does
 /// not. `Content-Length` is not one: it counts the message body, so it goes
 /// stale as soon as a consumer rewrites the part it would be copied onto.
-fn canonical_body_header(name: &str) -> Option<Cow<'_, str>> {
+fn canonical_body_header(name: &str) -> Option<&str> {
     if name.eq_ignore_ascii_case("c") {
-        return Some(Cow::Borrowed("Content-Type"));
+        return Some("Content-Type");
     }
     if name.eq_ignore_ascii_case("e") {
-        return Some(Cow::Borrowed("Content-Encoding"));
+        return Some("Content-Encoding");
     }
     if name.eq_ignore_ascii_case("l") || name.eq_ignore_ascii_case("Content-Length") {
         return None;
@@ -515,7 +503,7 @@ fn canonical_body_header(name: &str) -> Option<Cow<'_, str>> {
     name.as_bytes()
         .get(..8)
         .is_some_and(|prefix| prefix.eq_ignore_ascii_case(b"content-"))
-        .then_some(Cow::Borrowed(name))
+        .then_some(name)
 }
 
 /// Returns `true` for `application/json` and any `application/*+json` subtype.
