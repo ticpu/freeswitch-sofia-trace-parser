@@ -328,19 +328,24 @@ Downstream redaction dispatches per part; a second code path for plain
 bodies is a second place to forget a media type, and an unknown type has
 to surface as a part for a fail-closed consumer to withhold it.
 
-That fabricated part carries the message's `Content-*` headers under
-their canonical names, less `Content-Length`, which counts the message
-body and goes stale once a consumer rewrites the part. Nothing in a
-per-part loop tells a fabricated part from a wire one, so a transfer
-encoding visible on only one kind leaves redaction reading encoded bytes
-as text.
+That fabricated part carries the message's `Content-*` headers, compact
+forms expanded to their full names, less `Content-Length`, which counts
+the message body and goes stale once a consumer rewrites the part.
+Nothing in a per-part loop tells a fabricated part from a wire one, so a
+transfer encoding visible on only one kind leaves redaction reading
+encoded bytes as text.
+
+Boundary delimiters match only as full RFC 2046 delimiter lines —
+line-anchored, with the delimiter tail checked — never as substrings, so
+binary content cannot fabricate parts and a boundary cannot match inside
+a longer one. A body cut off before the close delimiter still surfaces
+its trailing bytes as a part; truncation must not make bytes vanish from
+a per-part loop.
 
 Splitting is one level per call and never recursive on the library's
 side: a nested `multipart/*` part surfaces intact with its media type,
 and a caller that wants its children asks explicitly. Depth stays a
-caller decision, so a malformed boundary — which can false-match inside
-binary content and fabricate structure — only does so where a caller
-chose to descend.
+caller decision.
 
 ## Pcap on Demand from Text Traces
 
@@ -389,11 +394,11 @@ need parsing pay nothing for it; the CLI enables it transitively.
 
 ## Typed Remote Address
 
-Which shapes the frame header's remote address takes (bracketed IPv6,
-numeric-only hosts) is Level 1 knowledge, so the typed accessor lives
-here instead of every consumer re-learning mod_sofia's forms. Anything
-that isn't `ip:port` yields `None` rather than a guess; the raw string
-remains available.
+Which shapes the frame header's remote address takes is Level 1
+knowledge — mod_sofia brackets IPv4 like IPv6 — so the typed accessor
+lives here instead of every consumer re-learning those forms. Anything
+that isn't an ip:port shape yields `None` rather than a guess; the raw
+string remains available.
 
 ## Error Recovery at Frame Boundaries
 
