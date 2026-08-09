@@ -341,6 +341,58 @@ impl SipMessageType {
     }
 }
 
+/// Headers in wire order as `(name, value)` pairs. Names preserve original
+/// casing; [`value`](Self::value) is the case-insensitive lookup.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Headers(pub Vec<(String, String)>);
+
+impl Headers {
+    /// Case-insensitive header lookup, first match in wire order. Compact
+    /// forms are not resolved: ask for the name the message is expected to
+    /// carry.
+    pub fn value(&self, name: &str) -> Option<&str> {
+        self.0
+            .iter()
+            .find(|(k, _)| k.eq_ignore_ascii_case(name))
+            .map(|(_, v)| v.as_str())
+    }
+}
+
+impl std::ops::Deref for Headers {
+    type Target = [(String, String)];
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl std::ops::DerefMut for Headers {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.0
+    }
+}
+
+impl From<Vec<(String, String)>> for Headers {
+    fn from(headers: Vec<(String, String)>) -> Self {
+        Headers(headers)
+    }
+}
+
+impl FromIterator<(String, String)> for Headers {
+    fn from_iter<I: IntoIterator<Item = (String, String)>>(iter: I) -> Self {
+        Headers(iter.into_iter().collect())
+    }
+}
+
+impl<'a> IntoIterator for &'a Headers {
+    type Item = &'a (String, String);
+    type IntoIter = std::slice::Iter<'a, (String, String)>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.0.iter()
+    }
+}
+
 /// A fully parsed SIP message (Level 3 output).
 ///
 /// Provides typed access to the request/response line, headers, and body.
@@ -359,9 +411,8 @@ pub struct ParsedSipMessage {
     pub timestamp: Timestamp,
     /// Parsed request or response first line.
     pub message_type: SipMessageType,
-    /// Headers in wire order as `(name, value)` pairs. Names preserve
-    /// original casing; lookups are case-insensitive.
-    pub headers: Vec<(String, String)>,
+    /// Message headers in wire order.
+    pub headers: Headers,
     /// Raw body bytes after the `\r\n\r\n` header terminator.
     pub body: Vec<u8>,
     /// Number of Level 1 frames that were reassembled into this message.
@@ -378,28 +429,24 @@ pub struct ParsedSipMessage {
 pub struct SipFragment {
     /// Request or status line, when the fragment begins with one.
     pub message_type: Option<SipMessageType>,
-    /// Headers in wire order as `(name, value)` pairs.
-    pub headers: Vec<(String, String)>,
+    /// Fragment headers in wire order.
+    pub headers: Headers,
     /// Body bytes after the `\r\n\r\n` terminator, empty when absent.
     pub body: Vec<u8>,
 }
 
 impl SipFragment {
-    /// Case-insensitive header lookup, first match in wire order. Compact forms
-    /// are not resolved: ask for the name the fragment is expected to carry.
+    /// Case-insensitive header lookup, first match in wire order.
     pub fn header_value(&self, name: &str) -> Option<&str> {
-        self.headers
-            .iter()
-            .find(|(k, _)| k.eq_ignore_ascii_case(name))
-            .map(|(_, v)| v.as_str())
+        self.headers.value(name)
     }
 }
 
 /// A single part from a multipart MIME body.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MimePart {
-    /// MIME part headers (e.g., Content-Type, Content-ID).
-    pub headers: Vec<(String, String)>,
+    /// Part headers in wire order (e.g., Content-Type, Content-ID).
+    pub headers: Headers,
     /// Part body bytes.
     pub body: Vec<u8>,
 }
@@ -407,18 +454,12 @@ pub struct MimePart {
 impl MimePart {
     /// Returns the Content-Type header value, if present.
     pub fn content_type(&self) -> Option<&str> {
-        self.headers
-            .iter()
-            .find(|(k, _)| k.eq_ignore_ascii_case("Content-Type"))
-            .map(|(_, v)| v.as_str())
+        self.headers.value("Content-Type")
     }
 
-    fn header_value(&self, name: &str) -> Option<&str> {
-        let name_lower = name.to_ascii_lowercase();
-        self.headers
-            .iter()
-            .find(|(k, _)| k.to_ascii_lowercase() == name_lower)
-            .map(|(_, v)| v.as_str())
+    /// Case-insensitive header lookup, first match in wire order.
+    pub fn header_value(&self, name: &str) -> Option<&str> {
+        self.headers.value(name)
     }
 
     /// Returns the Content-ID header value, if present.
@@ -512,12 +553,10 @@ impl ParsedSipMessage {
         out
     }
 
-    fn header_value(&self, name: &str) -> Option<&str> {
-        let name_lower = name.to_ascii_lowercase();
-        self.headers
-            .iter()
-            .find(|(k, _)| k.to_ascii_lowercase() == name_lower)
-            .map(|(_, v)| v.as_str())
+    /// Case-insensitive header lookup, first match in wire order. Compact
+    /// forms are not resolved; the typed accessors above check both names.
+    pub fn header_value(&self, name: &str) -> Option<&str> {
+        self.headers.value(name)
     }
 }
 
@@ -541,10 +580,12 @@ mod tests {
                 usec: 0,
             },
             message_type: msg_type,
-            headers: headers
-                .iter()
-                .map(|(k, v)| (k.to_string(), v.to_string()))
-                .collect(),
+            headers: Headers(
+                headers
+                    .iter()
+                    .map(|(k, v)| (k.to_string(), v.to_string()))
+                    .collect(),
+            ),
             body: body.to_vec(),
             frame_count: 1,
         }

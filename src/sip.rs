@@ -7,8 +7,8 @@ use sip_header::extract_all_headers;
 use crate::frame::ParseError;
 use crate::message::MessageIterator;
 use crate::types::{
-    MimePart, ParseStats, ParsedSipMessage, SipFragment, SipMessage, SipMessageType, SkipTracking,
-    UnparsedRegion,
+    Headers, MimePart, ParseStats, ParsedSipMessage, SipFragment, SipMessage, SipMessageType,
+    SkipTracking, UnparsedRegion,
 };
 
 static CRLF: LazyLock<memmem::Finder<'static>> = LazyLock::new(|| memmem::Finder::new(b"\r\n"));
@@ -276,9 +276,9 @@ fn bytes_to_string(b: &[u8]) -> String {
     }
 }
 
-fn parse_headers(data: &[u8]) -> Vec<(String, String)> {
+fn parse_headers(data: &[u8]) -> Headers {
     let text = String::from_utf8_lossy(data);
-    extract_all_headers(&text)
+    Headers(extract_all_headers(&text))
 }
 
 /// Parse a `message/sipfrag` body (RFC 3420) — any prefix of a SIP message.
@@ -448,7 +448,7 @@ impl ParsedSipMessage {
             headers.push((canonical.into_owned(), value.clone()));
         }
         vec![MimePart {
-            headers,
+            headers: Headers(headers),
             body: self.body.clone(),
         }]
     }
@@ -726,7 +726,7 @@ fn parse_mime_part(data: &[u8]) -> MimePart {
                 }
             } else {
                 MimePart {
-                    headers: Vec::new(),
+                    headers: Headers::default(),
                     body: data.to_vec(),
                 }
             }
