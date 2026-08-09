@@ -440,6 +440,13 @@ impl SipFragment {
     pub fn header_value(&self, name: &str) -> Option<&str> {
         self.headers.value(name)
     }
+
+    /// Returns the Content-Type header value. Checks both `Content-Type` and
+    /// the compact form `c`.
+    pub fn content_type(&self) -> Option<&str> {
+        self.header_value("Content-Type")
+            .or_else(|| self.header_value("c"))
+    }
 }
 
 /// A single part from a multipart MIME body.

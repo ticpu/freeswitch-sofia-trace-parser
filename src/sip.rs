@@ -342,6 +342,15 @@ fn split_multipart(content_type: Option<&str>, body: &[u8]) -> Option<Vec<MimePa
     (!parts.is_empty()).then_some(parts)
 }
 
+impl SipFragment {
+    /// Content-Type with parameters stripped and lowercased, e.g.
+    /// `application/sdp` from `Application/SDP; charset=utf-8`. Use this to
+    /// dispatch on the type rather than matching the raw header value.
+    pub fn media_type(&self) -> Option<Cow<'_, str>> {
+        self.content_type().map(normalize_media_type)
+    }
+}
+
 impl MimePart {
     /// Content-Type with parameters stripped and lowercased, e.g.
     /// `application/sdp` from `Application/SDP; charset=utf-8`. Use this to
@@ -395,8 +404,7 @@ impl ParsedSipMessage {
 
     /// Extract the MIME boundary string from the Content-Type header.
     pub fn multipart_boundary(&self) -> Option<&str> {
-        let ct = self.content_type()?;
-        extract_boundary(ct)
+        extract_boundary(self.content_type()?)
     }
 
     /// Split a multipart body into individual [`MimePart`]s.
@@ -423,7 +431,7 @@ impl ParsedSipMessage {
     ///
     /// Descends one level only; nested multipart parts are split by calling
     /// [`MimePart::body_parts`] on them.
-    pub fn all_body_parts(&self) -> Vec<MimePart> {
+    pub fn body_as_parts(&self) -> Vec<MimePart> {
         if self.body.is_empty() {
             return Vec::new();
         }
@@ -1416,7 +1424,7 @@ mod tests {
         let parsed = msg.parse().unwrap();
         assert!(parsed.body_parts().is_none());
 
-        let parts = parsed.all_body_parts();
+        let parts = parsed.body_as_parts();
         assert_eq!(parts.len(), 1);
         assert_eq!(parts[0].body, b"--empty--");
     }
@@ -1532,10 +1540,10 @@ mod tests {
         assert_eq!(parts[0].media_type().as_deref(), Some("application/sdp"));
     }
 
-    // --- all_body_parts tests ---
+    // --- body_as_parts tests ---
 
     #[test]
-    fn all_body_parts_wraps_non_multipart() {
+    fn body_as_parts_wraps_non_multipart() {
         let body = b"v=0\r\no=- 1 1 IN IP4 10.0.0.1\r\n";
         let mut content = Vec::new();
         content.extend_from_slice(b"INVITE sip:host SIP/2.0\r\n");
@@ -1546,14 +1554,14 @@ mod tests {
         content.extend_from_slice(body);
 
         let parsed = make_sip_message(&content).parse().unwrap();
-        let parts = parsed.all_body_parts();
+        let parts = parsed.body_as_parts();
         assert_eq!(parts.len(), 1);
         assert_eq!(parts[0].media_type().as_deref(), Some("application/sdp"));
         assert_eq!(parts[0].body, body);
     }
 
     #[test]
-    fn all_body_parts_matches_body_parts_for_multipart() {
+    fn body_as_parts_matches_body_parts_for_multipart() {
         let msg = make_multipart_invite(
             "abp-multi",
             &[
@@ -1562,7 +1570,7 @@ mod tests {
             ],
         );
         let parsed = msg.parse().unwrap();
-        let all = parsed.all_body_parts();
+        let all = parsed.body_as_parts();
         let split = parsed.body_parts().unwrap();
         assert_eq!(all.len(), split.len());
         for (a, b) in all.iter().zip(split.iter()) {
@@ -1572,17 +1580,17 @@ mod tests {
     }
 
     #[test]
-    fn all_body_parts_empty_body() {
+    fn body_as_parts_empty_body() {
         let content = b"OPTIONS sip:host SIP/2.0\r\n\
             Call-ID: abp-empty@host\r\n\
             Content-Length: 0\r\n\
             \r\n";
         let parsed = make_sip_message(content).parse().unwrap();
-        assert!(parsed.all_body_parts().is_empty());
+        assert!(parsed.body_as_parts().is_empty());
     }
 
     #[test]
-    fn all_body_parts_multipart_without_boundary() {
+    fn body_as_parts_multipart_without_boundary() {
         let body = b"--something\r\nContent-Type: application/sdp\r\n\r\nv=0\r\n";
         let mut content = Vec::new();
         content.extend_from_slice(b"INVITE sip:host SIP/2.0\r\n");
@@ -1593,7 +1601,7 @@ mod tests {
         content.extend_from_slice(body);
 
         let parsed = make_sip_message(&content).parse().unwrap();
-        let parts = parsed.all_body_parts();
+        let parts = parsed.body_as_parts();
         assert_eq!(
             parts.len(),
             1,
@@ -1604,14 +1612,14 @@ mod tests {
     }
 
     #[test]
-    fn all_body_parts_boundary_not_in_body() {
+    fn body_as_parts_boundary_not_in_body() {
         let body = b"--other\r\nContent-Type: application/sdp\r\n\r\nv=0\r\n--other--";
         let parsed = parsed_with_headers(
             "abp-mismatch",
             &["Content-Type: multipart/mixed;boundary=declared"],
             body,
         );
-        let parts = parsed.all_body_parts();
+        let parts = parsed.body_as_parts();
         assert_eq!(
             parts.len(),
             1,
@@ -1623,14 +1631,14 @@ mod tests {
     }
 
     #[test]
-    fn all_body_parts_truncated_multipart() {
+    fn body_as_parts_truncated_multipart() {
         let body = b"--trunc\r\nContent-Type: application/sdp\r\n\r\nv=0\r\n";
         let parsed = parsed_with_headers(
             "abp-trunc",
             &["Content-Type: multipart/mixed;boundary=trunc"],
             body,
         );
-        let parts = parsed.all_body_parts();
+        let parts = parsed.body_as_parts();
         assert_eq!(
             parts.len(),
             1,
@@ -1730,7 +1738,7 @@ mod tests {
             ],
             b"PD94bWwgdmVyc2lvbj0iMS4wIj8+",
         );
-        let parts = parsed.all_body_parts();
+        let parts = parsed.body_as_parts();
         assert_eq!(
             parts[0].content_transfer_encoding(),
             Some("base64"),
@@ -1749,7 +1757,7 @@ mod tests {
             ],
             b"v=0\r\n",
         );
-        let parts = parsed.all_body_parts();
+        let parts = parsed.body_as_parts();
         assert_eq!(parts[0].content_disposition(), Some("session"));
         assert_eq!(parts[0].content_id(), Some("<sdp@host>"));
     }
@@ -1761,7 +1769,7 @@ mod tests {
             &["Content-Type: application/sdp", "e: gzip"],
             b"v=0\r\n",
         );
-        let parts = parsed.all_body_parts();
+        let parts = parsed.body_as_parts();
         assert_eq!(
             part_header(&parts[0], "Content-Encoding"),
             Some("gzip"),
@@ -1772,7 +1780,7 @@ mod tests {
     #[test]
     fn synthetic_part_canonicalizes_compact_content_type() {
         let parsed = parsed_with_headers("abp-compact-c", &["c: application/sdp"], b"v=0\r\n");
-        let parts = parsed.all_body_parts();
+        let parts = parsed.body_as_parts();
         assert_eq!(parts[0].media_type().as_deref(), Some("application/sdp"));
         assert_eq!(
             parts[0]
@@ -1791,7 +1799,7 @@ mod tests {
             &["c: text/plain", "Content-Type: application/sdp"],
             b"v=0\r\n",
         );
-        let parts = parsed.all_body_parts();
+        let parts = parsed.body_as_parts();
         assert_eq!(parts[0].content_type(), parsed.content_type());
         assert_eq!(
             parts[0]
@@ -1806,7 +1814,7 @@ mod tests {
     #[test]
     fn synthetic_part_omits_content_length() {
         let parsed = parsed_with_headers("abp-len", &["Content-Type: application/sdp"], b"v=0\r\n");
-        let parts = parsed.all_body_parts();
+        let parts = parsed.body_as_parts();
         assert_eq!(part_header(&parts[0], "Content-Length"), None);
         assert_eq!(part_header(&parts[0], "l"), None);
     }
@@ -1821,7 +1829,7 @@ mod tests {
             ],
             b"v=0\r\n",
         );
-        let parts = parsed.all_body_parts();
+        let parts = parsed.body_as_parts();
         assert_eq!(part_header(&parts[0], "Subject"), None);
         assert_eq!(part_header(&parts[0], "Call-ID"), None);
     }
@@ -1836,7 +1844,7 @@ mod tests {
             b"Content-Transfer-Encoding: base64\r\n".iter().copied(),
         );
         let parsed = make_sip_message(&content).parse().unwrap();
-        let parts = parsed.all_body_parts();
+        let parts = parsed.body_as_parts();
         assert_eq!(parts.len(), 1);
         assert_eq!(
             parts[0].content_transfer_encoding(),
@@ -1879,7 +1887,7 @@ mod tests {
     #[test]
     fn nested_multipart_not_flattened() {
         let parsed = make_nested_multipart_invite().parse().unwrap();
-        let parts = parsed.all_body_parts();
+        let parts = parsed.body_as_parts();
         assert_eq!(parts.len(), 2);
         assert_eq!(parts[0].media_type().as_deref(), Some("application/sdp"));
         assert_eq!(parts[1].media_type().as_deref(), Some("multipart/mixed"));
@@ -1888,7 +1896,7 @@ mod tests {
     #[test]
     fn nested_multipart_explicit_descent() {
         let parsed = make_nested_multipart_invite().parse().unwrap();
-        let outer = parsed.all_body_parts();
+        let outer = parsed.body_as_parts();
         let nested = &outer[1];
 
         assert!(nested.is_multipart());
@@ -1906,7 +1914,7 @@ mod tests {
     #[test]
     fn non_multipart_part_has_no_children() {
         let parsed = make_nested_multipart_invite().parse().unwrap();
-        let sdp_part = &parsed.all_body_parts()[0];
+        let sdp_part = &parsed.body_as_parts()[0];
         assert!(!sdp_part.is_multipart());
         assert!(sdp_part.multipart_boundary().is_none());
         assert!(sdp_part.body_parts().is_none());
@@ -2004,6 +2012,19 @@ mod tests {
     }
 
     #[test]
+    fn sipfrag_content_type_and_media_type() {
+        let frag = parse_sipfrag(
+            b"SIP/2.0 200 OK\r\nContent-Type: Application/SDP; charset=utf-8\r\n\r\nv=0",
+        )
+        .unwrap();
+        assert_eq!(frag.content_type(), Some("Application/SDP; charset=utf-8"));
+        assert_eq!(frag.media_type().as_deref(), Some("application/sdp"));
+
+        let compact = parse_sipfrag(b"SIP/2.0 200 OK\r\nc: text/plain\r\n\r\nhi").unwrap();
+        assert_eq!(compact.content_type(), Some("text/plain"));
+    }
+
+    #[test]
     fn sipfrag_malformed_start_line_with_colon_is_error() {
         assert!(parse_sipfrag(b"INVITE sip:host SIP/1.0\r\n").is_err());
     }
@@ -2024,7 +2045,7 @@ mod tests {
         let body = b"SIP/2.0 100 Trying\r\n";
         let msg = make_multipart_invite("frag-boundary", &[("message/sipfrag", body)]);
         let parsed = msg.parse().unwrap();
-        let parts = parsed.all_body_parts();
+        let parts = parsed.body_as_parts();
         assert_eq!(parts[0].media_type().as_deref(), Some("message/sipfrag"));
 
         let frag = parts[0].parse_sipfrag().unwrap();
