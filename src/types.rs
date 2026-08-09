@@ -609,6 +609,14 @@ mod tests {
     }
 
     #[test]
+    fn socket_addr_ipv4_bracketed() {
+        let addr = make_frame("[198.51.100.7]:5060").socket_addr().unwrap();
+        assert!(addr.is_ipv4());
+        assert_eq!(addr.port(), 5060);
+        assert_eq!(addr.ip().to_string(), "198.51.100.7");
+    }
+
+    #[test]
     fn socket_addr_on_parsed_message() {
         let addr = parsed_with_address("192.0.2.4:5080").socket_addr().unwrap();
         assert_eq!(addr.port(), 5080);

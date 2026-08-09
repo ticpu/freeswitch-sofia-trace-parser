@@ -1572,7 +1572,65 @@ mod tests {
             1,
             "a body cut off before the closing delimiter must not vanish"
         );
-        assert_eq!(parts[0].body, body);
+        assert_eq!(parts[0].content_type(), Some("application/sdp"));
+        assert_eq!(parts[0].body, b"v=0\r\n");
+        assert!(parsed.body_parts().is_some());
+    }
+
+    #[test]
+    fn multipart_truncated_trailing_part() {
+        let body = b"--b\r\nContent-Type: application/sdp\r\n\r\nv=0\r\n\
+            --b\r\nContent-Type: application/pidf+xml\r\n\r\n<presence";
+        let parts = parse_multipart_body(body, "b");
+        assert_eq!(parts.len(), 2);
+        assert_eq!(parts[0].body, b"v=0");
+        assert_eq!(parts[1].content_type(), Some("application/pidf+xml"));
+        assert_eq!(parts[1].body, b"<presence");
+    }
+
+    #[test]
+    fn multipart_truncated_inside_close_delimiter() {
+        let body = b"--b\r\nContent-Type: application/sdp\r\n\r\nv=0\r\n--b";
+        let parts = parse_multipart_body(body, "b");
+        assert_eq!(parts.len(), 1);
+        assert_eq!(parts[0].body, b"v=0");
+    }
+
+    #[test]
+    fn multipart_preamble_substring_no_false_part() {
+        let body = b"preamble mentions --b in passing\r\n\
+            --b\r\nContent-Type: application/sdp\r\n\r\nv=0\r\n--b--";
+        let parts = parse_multipart_body(body, "b");
+        assert_eq!(parts.len(), 1);
+        assert_eq!(parts[0].content_type(), Some("application/sdp"));
+        assert_eq!(parts[0].body, b"v=0");
+    }
+
+    #[test]
+    fn multipart_boundary_prefix_collision() {
+        let body =
+            b"--b\r\nContent-Type: text/plain\r\n\r\nouter\r\n--b2\r\ninner text\r\n--b2--\r\n--b--";
+        let parts = parse_multipart_body(body, "b");
+        assert_eq!(parts.len(), 1);
+        assert_eq!(parts[0].body, b"outer\r\n--b2\r\ninner text\r\n--b2--");
+    }
+
+    #[test]
+    fn multipart_delimiter_transport_padding() {
+        let body = b"--b \t\r\nContent-Type: application/sdp\r\n\r\nv=0\r\n\
+            --b  \r\nContent-Type: application/pidf+xml\r\n\r\n<presence/>\r\n--b--";
+        let parts = parse_multipart_body(body, "b");
+        assert_eq!(parts.len(), 2);
+        assert_eq!(parts[0].body, b"v=0");
+        assert_eq!(parts[1].body, b"<presence/>");
+    }
+
+    #[test]
+    fn multipart_no_preamble_delimiter_at_offset_zero() {
+        let body = b"--b\r\nContent-Type: application/sdp\r\n\r\nv=0\r\n--b--";
+        let parts = parse_multipart_body(body, "b");
+        assert_eq!(parts.len(), 1);
+        assert_eq!(parts[0].body, b"v=0");
     }
 
     // --- content headers copied onto the synthetic part ---
@@ -1879,6 +1937,22 @@ mod tests {
     fn sipfrag_garbage_is_error() {
         assert!(parse_sipfrag(b"just some text without a colon").is_err());
         assert!(parse_sipfrag(b"").is_err());
+    }
+
+    #[test]
+    fn sipfrag_malformed_start_line_with_colon_is_error() {
+        assert!(parse_sipfrag(b"INVITE sip:host SIP/1.0\r\n").is_err());
+    }
+
+    #[test]
+    fn sipfrag_lf_only_status_line() {
+        let frag = parse_sipfrag(b"SIP/2.0 200 OK\n").unwrap();
+        assert!(matches!(
+            frag.message_type,
+            Some(SipMessageType::Response { code: 200, ref reason }) if reason == "OK"
+        ));
+        assert!(frag.headers.is_empty());
+        assert!(frag.body.is_empty());
     }
 
     #[test]
