@@ -223,6 +223,19 @@ fn is_sip_token(b: &[u8]) -> bool {
             .all(|&c| c.is_ascii_alphanumeric() || b"-._!%*+'~".contains(&c))
 }
 
+/// A syntactically valid header first line: a nonempty SIP token, optionally
+/// followed by HCOLON whitespace (SP / HTAB), then a colon.
+fn is_header_line(line: &[u8]) -> bool {
+    let Some(colon) = memchr::memchr(b':', line) else {
+        return false;
+    };
+    let mut name = &line[..colon];
+    while let [rest @ .., b' ' | b'\t'] = name {
+        name = rest;
+    }
+    is_sip_token(name)
+}
+
 fn parse_request_line(line: &[u8]) -> Result<SipMessageType, ParseError> {
     // <METHOD> <URI> SIP/2.0
     let first_space = memchr::memchr(b' ', line)
@@ -280,16 +293,21 @@ pub fn parse_sipfrag(data: &[u8]) -> Result<SipFragment, ParseError> {
     }
 
     let first_line_end = CRLF.find(data).unwrap_or(data.len());
-    let first_line = &data[..first_line_end];
+    let mut first_line = &data[..first_line_end];
+    // A bare trailing terminator from an LF-only writer is not part of the
+    // start line; a full CRLF is already excluded by the find above.
+    if let [rest @ .., b'\n'] = first_line {
+        first_line = rest;
+    }
+    if let [rest @ .., b'\r'] = first_line {
+        first_line = rest;
+    }
 
     let (message_type, headers_start) = match parse_first_line(first_line) {
         Ok(mt) => (Some(mt), (first_line_end + 2).min(data.len())),
-        Err(_) => {
-            if memchr::memchr(b':', first_line).is_none() {
-                return Err(ParseError::InvalidMessage(format!(
-                    "first line is neither a start line nor a header: {:?}",
-                    String::from_utf8_lossy(first_line)
-                )));
+        Err(e) => {
+            if !is_header_line(first_line) {
+                return Err(e);
             }
             (None, 0)
         }
@@ -591,56 +609,102 @@ fn extract_boundary(content_type: &str) -> Option<&str> {
     }
 }
 
+/// What follows a matched `--boundary` token, deciding whether the match is a
+/// real RFC 2046 delimiter line and where the next part's content starts.
+enum BoundaryTail {
+    /// Open delimiter; the value is the byte count from the end of the token
+    /// (transport padding plus CRLF) to the start of the part content.
+    Open(usize),
+    Close,
+    /// Input ends inside the delimiter line itself (truncated dump).
+    End,
+}
+
+/// Classify the bytes after a `--boundary` token. `None` means the match is
+/// not a delimiter line at all — e.g. boundary `b` matched inside `--b2`.
+fn boundary_tail(rest: &[u8]) -> Option<BoundaryTail> {
+    if rest.starts_with(b"--") {
+        return Some(BoundaryTail::Close);
+    }
+    let pad = rest
+        .iter()
+        .position(|&b| b != b' ' && b != b'\t')
+        .unwrap_or(rest.len());
+    match &rest[pad..] {
+        [] => Some(BoundaryTail::End),
+        [b'\r', b'\n', ..] => Some(BoundaryTail::Open(pad + 2)),
+        _ => None,
+    }
+}
+
+/// Next RFC 2046 delimiter line at or after `from`: `--boundary` at body
+/// offset 0 (no preamble) or immediately after a CRLF. `part_end` is where the
+/// preceding part's content stops — the CRLF belongs to the delimiter line.
+fn next_delimiter(
+    body: &[u8],
+    from: usize,
+    dash_boundary: &[u8],
+    anchored: &memmem::Finder<'_>,
+) -> Option<(usize, usize, BoundaryTail)> {
+    if from == 0 && body.starts_with(dash_boundary) {
+        if let Some(tail) = boundary_tail(&body[dash_boundary.len()..]) {
+            return Some((0, dash_boundary.len(), tail));
+        }
+    }
+    let mut search = from;
+    while let Some(rel) = anchored.find(&body[search..]) {
+        let crlf = search + rel;
+        let token_end = crlf + 2 + dash_boundary.len();
+        if let Some(tail) = boundary_tail(&body[token_end..]) {
+            return Some((crlf, token_end, tail));
+        }
+        search = crlf + 1;
+    }
+    None
+}
+
 fn parse_multipart_body(body: &[u8], boundary: &str) -> Vec<MimePart> {
-    let open_delim = format!("--{boundary}");
-    let open_bytes = open_delim.as_bytes();
+    let mut pattern = Vec::with_capacity(boundary.len() + 4);
+    pattern.extend_from_slice(b"\r\n--");
+    pattern.extend_from_slice(boundary.as_bytes());
+    let anchored = memmem::Finder::new(&pattern);
+    let dash_boundary = &pattern[2..];
 
     let mut parts = Vec::new();
 
-    // Find the first opening delimiter
-    let mut pos = match memmem::find(body, open_bytes) {
-        Some(p) => p + open_bytes.len(),
-        None => return parts,
+    let Some((_, token_end, tail)) = next_delimiter(body, 0, dash_boundary, &anchored) else {
+        return parts;
+    };
+    let mut cursor = match tail {
+        BoundaryTail::Open(skip) => token_end + skip,
+        // The body opens with the close delimiter, or truncates inside the
+        // first delimiter line: no parts.
+        BoundaryTail::Close | BoundaryTail::End => return parts,
     };
 
-    // Check for close delimiter immediately
-    if body[pos..].starts_with(b"--") {
-        return parts;
-    }
-
-    // Skip CRLF after delimiter
-    if body[pos..].starts_with(b"\r\n") {
-        pos += 2;
-    }
-
-    while let Some(next) = memmem::find(&body[pos..], open_bytes) {
-        // Part content: strip trailing CRLF before delimiter
-        let mut end = pos + next;
-        if end >= 2 && body[end - 2] == b'\r' && body[end - 1] == b'\n' {
-            end -= 2;
-        }
-
-        parts.push(parse_mime_part(&body[pos..end]));
-
-        // Move past delimiter
-        pos = pos + next + open_bytes.len();
-
-        // Check for close delimiter
-        if body[pos..].starts_with(b"--") {
-            break;
-        }
-
-        // Skip CRLF after delimiter
-        if body[pos..].starts_with(b"\r\n") {
-            pos += 2;
+    loop {
+        match next_delimiter(body, cursor, dash_boundary, &anchored) {
+            Some((part_end, token_end, BoundaryTail::Open(skip))) => {
+                parts.push(parse_mime_part(&body[cursor..part_end]));
+                cursor = token_end + skip;
+            }
+            Some((part_end, _, BoundaryTail::Close | BoundaryTail::End)) => {
+                parts.push(parse_mime_part(&body[cursor..part_end]));
+                break;
+            }
+            // Truncated before the close delimiter: the trailing bytes are
+            // the final part, never silently dropped.
+            None => {
+                parts.push(parse_mime_part(&body[cursor..]));
+                break;
+            }
         }
     }
-
     parts
 }
 
 fn parse_mime_part(data: &[u8]) -> MimePart {
-    match memmem::find(data, b"\r\n\r\n") {
+    match CRLFCRLF.find(data) {
         Some(pos) => {
             let header_bytes = &data[..pos];
             let body = &data[pos + 4..];
@@ -653,7 +717,7 @@ fn parse_mime_part(data: &[u8]) -> MimePart {
         None => {
             // Could be headers-only or body-only.
             // If first line has a colon, treat as headers with no body.
-            let first_line_end = memmem::find(data, b"\r\n").unwrap_or(data.len());
+            let first_line_end = CRLF.find(data).unwrap_or(data.len());
             if memchr::memchr(b':', &data[..first_line_end]).is_some() {
                 let headers = parse_headers(data);
                 MimePart {
