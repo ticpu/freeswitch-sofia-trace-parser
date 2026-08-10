@@ -26,10 +26,14 @@ cargo check --features cli --all-targets --message-format=short
 cargo test --release --lib
 cargo test --release --features cli --bin freeswitch-sofia-trace-parser
 cargo semver-checks --baseline-rev <last-tag> --only-explicit-features
+cargo publish --dry-run
 ```
 
-`--only-explicit-features` is required: the `pidf-test` feature pulls a git-only
-dependency that a bare semver-checks run cannot resolve.
+`--only-explicit-features` keeps semver-checks to the lib-only surface.
+
+`eido` is a git dependency and lives in `[dev-dependencies]` so that cargo
+strips it from the published manifest; a git dependency in `[dependencies]`
+has no crates.io version and blocks publishing outright. Never move it back.
 
 The `pre-commit` hook re-runs fmt, clippy, rustdoc coverage, tests and
 semver-checks on the release commit, so it is the gate — the list above only
@@ -114,16 +118,26 @@ git push origin vX.Y.Z
    CI does not run on tags and there is no release workflow — the tag is the
    release artifact. No GitHub release is created.
 
-7. Report the tag, the changelog, and the CI run that gated it.
+7. Publish, from the tagged commit:
+
+```sh
+git checkout vX.Y.Z
+cargo publish
+git switch master
+```
+
+   `git switch master` deletes the working-tree `Cargo.lock` (untracked there);
+   the next cargo command regenerates it.
+
+8. Report the tag, the changelog, the CI run that gated the publish, and the
+   crates.io version.
 
 ## Important
 
-- **No `cargo publish`.** The crate is not currently publishable: the optional
-  `eido` dependency is a git dependency with no crates.io version, which cargo
-  refuses at publish time. See `CLAUDE.local.md`.
-- **Never tag a commit CI has not run on.** If the tree changed after the checks
-  — a rebase, a hand-resolved conflict, a dependency that resolved differently —
-  the earlier green run does not cover it. Re-run the checks and go back to step 5.
+- **Never tag or publish a commit CI has not run on.** If the tree changed after
+  the checks — a rebase, a hand-resolved conflict, a dependency that resolved
+  differently — the earlier green run does not cover it. Re-run the checks and
+  go back to step 5.
 - **Ask before pushing the tag when anything deviated from these steps.** An
   outage, a rebase, a skipped step, a red-then-fixed run: report the state and
   let me decide.
