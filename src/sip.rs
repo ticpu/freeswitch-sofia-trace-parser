@@ -21,6 +21,70 @@ impl SipMessage {
     pub fn parse(&self) -> Result<ParsedSipMessage, ParseError> {
         parse_sip_message(self)
     }
+
+    /// The SIP method read straight from the reassembled bytes: the request
+    /// line for requests, the CSeq header for responses. This is the answer
+    /// [`ParsedSipMessage::method`] gives, without parsing the message.
+    ///
+    /// `None` whenever the bytes leave it in doubt — an invalid start line, a
+    /// response carrying no CSeq, or a CSeq value that is folded or not plain
+    /// ASCII. Filtering on this therefore drops only what it has classified,
+    /// and a message it does classify is one [`parse`](Self::parse) accepts.
+    pub fn method(&self) -> Option<&str> {
+        let first_line_end = CRLF.find(&self.content)?;
+        match parse_first_line_ref(&self.content[..first_line_end]).ok()? {
+            StartLineRef::Request { method, .. } => std::str::from_utf8(method).ok(),
+            StartLineRef::Response { .. } => {
+                let (headers, _) = split_headers_body(&self.content, first_line_end + 2);
+                cseq_method(headers)
+            }
+        }
+    }
+}
+
+/// Read the CSeq method the way `sip_header::extract_all_headers` reads
+/// headers, so the two cannot disagree: LF-separated lines, one optional
+/// trailing CR, stopping at the first blank line — which a bare LF pair can
+/// produce well before the `\r\n\r\n` that bounds the block.
+fn cseq_method(headers: &[u8]) -> Option<&str> {
+    let mut lines = headers.split(|&b| b == b'\n').peekable();
+
+    while let Some(line) = lines.next() {
+        let line = match line {
+            [rest @ .., b'\r'] => rest,
+            rest => rest,
+        };
+        if line.is_empty() {
+            return None;
+        }
+        if matches!(line.first(), Some(b' ' | b'\t')) {
+            continue;
+        }
+        let Some(colon) = memchr::memchr(b':', line) else {
+            continue;
+        };
+        let mut name = &line[..colon];
+        while let [rest @ .., b' ' | b'\t'] = name {
+            name = rest;
+        }
+        if name.contains(&b' ') || !name.eq_ignore_ascii_case(b"CSeq") {
+            continue;
+        }
+
+        if matches!(lines.peek(), Some([b' ' | b'\t', ..])) {
+            return None;
+        }
+        let value = &line[colon + 1..];
+        if !value.is_ascii() {
+            return None;
+        }
+        return std::str::from_utf8(value)
+            .ok()?
+            .split_ascii_whitespace()
+            .nth(1);
+    }
+
+    None
 }
 
 /// Level 3 streaming parser: wraps [`MessageIterator`] and parses each
@@ -174,14 +238,33 @@ fn parse_sip_content(msg: &SipMessage, content: &[u8]) -> Result<ParsedSipMessag
     })
 }
 
+/// A start line still pointing into the message it came from.
+enum StartLineRef<'a> {
+    Request { method: &'a [u8], uri: &'a [u8] },
+    Response { code: u16, reason: &'a [u8] },
+}
+
 fn parse_first_line(line: &[u8]) -> Result<SipMessageType, ParseError> {
+    Ok(match parse_first_line_ref(line)? {
+        StartLineRef::Request { method, uri } => SipMessageType::Request {
+            method: bytes_to_string(method),
+            uri: bytes_to_string(uri),
+        },
+        StartLineRef::Response { code, reason } => SipMessageType::Response {
+            code,
+            reason: bytes_to_string(reason),
+        },
+    })
+}
+
+fn parse_first_line_ref(line: &[u8]) -> Result<StartLineRef<'_>, ParseError> {
     if line.starts_with(b"SIP/2.0 ") {
         return parse_status_line(line);
     }
     parse_request_line(line)
 }
 
-fn parse_status_line(line: &[u8]) -> Result<SipMessageType, ParseError> {
+fn parse_status_line(line: &[u8]) -> Result<StartLineRef<'_>, ParseError> {
     // SIP/2.0 <code> <reason>
     let after_version = &line[8..]; // skip "SIP/2.0 "
 
@@ -194,9 +277,8 @@ fn parse_status_line(line: &[u8]) -> Result<SipMessageType, ParseError> {
         .map_err(|_| ParseError::InvalidMessage("invalid status code".into()))?;
 
     let reason = &after_version[space + 1..];
-    let reason = bytes_to_string(reason);
 
-    Ok(SipMessageType::Response { code, reason })
+    Ok(StartLineRef::Response { code, reason })
 }
 
 fn is_sip_token(b: &[u8]) -> bool {
@@ -218,7 +300,7 @@ fn is_header_line(line: &[u8]) -> bool {
     is_sip_token(name)
 }
 
-fn parse_request_line(line: &[u8]) -> Result<SipMessageType, ParseError> {
+fn parse_request_line(line: &[u8]) -> Result<StartLineRef<'_>, ParseError> {
     // <METHOD> <URI> SIP/2.0
     let first_space = memchr::memchr(b' ', line)
         .ok_or_else(|| ParseError::InvalidMessage("no space in request line".into()))?;
@@ -243,10 +325,7 @@ fn parse_request_line(line: &[u8]) -> Result<SipMessageType, ParseError> {
     }
     let uri = &rest[..last_space];
 
-    let method = bytes_to_string(method);
-    let uri = bytes_to_string(uri);
-
-    Ok(SipMessageType::Request { method, uri })
+    Ok(StartLineRef::Request { method, uri })
 }
 
 fn bytes_to_str(b: &[u8]) -> Cow<'_, str> {
@@ -810,7 +889,10 @@ mod tests {
             make_sip_message(b"INVITE sip:user@host SIP/3.0\r\nCSeq: 1 INVITE\r\n\r\n").method(),
             None
         );
-        assert_eq!(make_sip_message(b"garbage\r\nCSeq: 1 INVITE\r\n\r\n").method(), None);
+        assert_eq!(
+            make_sip_message(b"garbage\r\nCSeq: 1 INVITE\r\n\r\n").method(),
+            None
+        );
         assert_eq!(make_sip_message(b"\r\n\r\n").method(), None);
     }
 
