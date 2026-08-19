@@ -1,9 +1,9 @@
 # Performance
 
-Measured with the bundled CLI on production NG-911 dump files. Every number here
-came from a pinned, interleaved A/B run; the method is in
-[Measuring a change](#measuring-a-change) and matters more than the figures,
-which are workload- and build-specific.
+Measured with the bundled CLI on production NG-911 dump files. Every figure came
+from repeated interleaved runs, the parser comparisons additionally pinned to one
+core; the protocol in [Measuring a change](#measuring-a-change) matters more than
+the figures, which are workload- and build-specific.
 
 ## Throughput
 
@@ -19,6 +19,61 @@ Parse-only, reading an uncompressed dump from page cache, all messages parsed
 Per-message cost tracks message *count* far more than byte count — a dump of
 short keep-alives costs more per megabyte than one carrying multipart bodies.
 Compare like corpora only.
+
+## Decompression is not the bottleneck
+
+Dumps are archived xz-compressed, so decompression is the first thing everyone
+suspects — and it has not once been the answer. Two independent measurements:
+
+- **In-process profile.** A production run answering one phone-number query over
+  2,023,282 messages spent ~48% of cycles moving bytes and ~9% in SIP parsing
+  proper. `lzma_code` was **0.01%** — it did not register.
+- **Pipeline timing**, 400 MB of decompressed output on the Neoverse-N1:
+  `xzcat` alone 1.6 s, the parse alone 2.2 s, `xzcat | parser` 2.5 s. The stages
+  overlap in the pipe and the parse is the critical path; decompression hides
+  behind it and adds ~0.3 s.
+
+Profile the parse. Reach for the decompressor only after an actual profile puts
+it there — on this workload, no profile ever has.
+
+### The one decompression win: skip CRC64
+
+There is still cheap CPU to reclaim on the decompression side, and on ARM64 it
+is not small. `xz` verifies a CRC64 (ECMA-182) over the decompressed bytes.
+x86_64 has had a carry-less-multiply implementation of that for years; ARMv8's
+CRC instructions cover CRC32 only, so there is no equivalent instruction to fall
+back on. Decompressing to `/dev/null`, with and without `--ignore-check`:
+
+| CPU | xz | corpus | verify | `--ignore-check` | CRC64 cost |
+|---|---|---|---|---|---|
+| Neoverse-N1 | 5.8.1 | 1,604 MiB out | 5.07 s | 3.48 s | **31%**, 0.99 ms/MiB |
+| Xeon Silver 4214 | 5.4.1 | 237 MiB out | 948 ms | 889 ms | 6.2%, 0.25 ms/MiB |
+| Ryzen 9 7950X3D | 5.8.3 | 64 MiB out | 74 ms | 70 ms | 5.4%, 0.06 ms/MiB |
+
+Per byte the check spans a 16× range, cheapest on the newest x86 and worst on
+ARM64 — compare `ms/MiB`, not the percentage, which also moves with how fast
+each machine decompresses. The N1 measured here does expose `pmull`, so a
+carry-less-multiply CRC64 is possible in principle; at ~1 GB/s the check is
+running at table speed, so this build is not using one. For a host scanning the
+archive in bulk it is worth taking:
+
+```sh
+xz -dc --ignore-check profile.dump.1.xz | freeswitch-sofia-trace-parser -m INVITE
+```
+
+It buys throughput rather than latency: parsing is still the critical path in a
+pipe on every machine measured (on the N1, parse 184 MB/s against decompress
+331 MB/s verified), so on a single file the saving largely hides behind the
+parse. It pays when many files run in parallel, where CRC64 cycles are cycles
+not spent parsing.
+
+The trade is real: nothing then detects a corrupt or truncated stream, so a
+damaged file yields garbage instead of an error. Take it for bulk scanning of an
+archive that is verified elsewhere, not for a one-off investigation. A library
+consumer sets this on the decoder rather than the CLI — in liblzma it is
+`LZMA_IGNORE_CHECK` (`0x10`) passed to the stream decoder, which has the useful
+side effect of tolerating a truncated trailing block on the dump FreeSWITCH is
+still writing.
 
 ## Rejecting before Level 3
 
@@ -39,10 +94,29 @@ The gap is the traffic mix: OPTIONS keep-alives are ~87% of messages in an
 ESInet trace, and INVITE requests under 0.2%. On such a trace the prefilter
 skips almost all header extraction.
 
-Decompression does not dominate. Piping a 400 MB xz-compressed slice through
-`xzcat` on the Neoverse-N1 took 2.5 s, against 1.6 s for `xzcat` alone and 2.2 s
-for the parse alone — the two overlap in the pipe and the parse is the critical
-path.
+## Memory
+
+Constant memory for inputs of any size, including multi-day dump chains (50GB+).
+Validated with jemalloc heap profiling (`_RJEM_MALLOC_CONF=prof:true`) and gdb
+inspection of live structures while processing 50+ chained files.
+
+Parser internals at runtime, gdb-verified:
+
+- `FrameIterator::buf` — 64KB capacity, ~200 bytes used (single read buffer, never grows)
+- `MessageIterator::buffers` — 0 entries (TCP reassembly buffers evicted after message extraction)
+- `MessageIterator::ready` — 0 entries, capacity 10 (drained each iteration)
+
+What keeps it flat:
+
+- `SkipTracking` defaults to `CountOnly` — no allocation for unparsed region tracking unless opted in
+- TCP connection buffers are eagerly removed after complete message extraction
+- Stale buffers (>2h inactive) are evicted via time-based sweep, so TLS ephemeral ports cannot accumulate
+- `flush_all()` clears the entire buffer map at EOF
+
+**Consumers processing many files** should open them lazily, one at a time,
+rather than `Read::chain()` upfront: chaining keeps every file handle and
+decompression state alive for the whole run. With 50+ XZ-compressed dumps, eager
+chaining held 172MB of LZMA decoder state alone.
 
 ## Measuring a change
 

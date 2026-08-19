@@ -270,12 +270,13 @@ classified by `SkipReason`:
 `ParseStats` exposes `bytes_read`, `bytes_skipped`, and detailed `UnparsedRegion` records
 with offset, length, and skip reason for each region.
 
-## Throughput
+## Performance and Memory
 
-184–500 MB/s per core parsing every message, depending on CPU and message mix;
-see [`docs/performance.md`](docs/performance.md) for measured figures across
-three microarchitectures, and for how to measure a change to the parser without
-fooling yourself.
+184–500 MB/s per core parsing every message, depending on CPU and message mix,
+in constant memory for inputs of any size — multi-day dump chains (50GB+)
+included. Measured figures, the constant-memory design, and the protocol for
+benchmarking a change to the parser are in
+[`docs/performance.md`](docs/performance.md).
 
 A consumer keeping a small fraction of a trace should reject before Level 3
 rather than filter after it. [`SipMessage::method`](src/sip.rs) reads the method
@@ -283,31 +284,6 @@ from the reassembled bytes with no parse, and answers `None` rather than guess
 where the bytes do not settle it, so filtering on it drops only what it has
 classified. On an OPTIONS-dominated trace this cuts a filtered run roughly in
 half; the CLI's `--method`/`--exclude` use it.
-
-## Memory Profile
-
-The parser is designed for constant-memory streaming of arbitrarily large inputs,
-including multi-day dump file chains (50GB+). Memory behavior was validated using
-jemalloc heap profiling (`_RJEM_MALLOC_CONF=prof:true`) and gdb inspection of live
-data structures during processing of 50+ chained dump files.
-
-**Parser internals at runtime (gdb-verified):**
-
-- `FrameIterator::buf` — 64KB capacity, ~200 bytes used (single read buffer, never grows)
-- `MessageIterator::buffers` — 0 entries (TCP reassembly buffers evicted after message extraction)
-- `MessageIterator::ready` — 0 entries, capacity 10 (drained each iteration)
-
-**Design choices that maintain constant memory:**
-
-- `SkipTracking` defaults to `CountOnly` — no allocation for unparsed region tracking unless opted in
-- TCP connection buffers are eagerly removed after complete message extraction
-- Stale buffers (>2h inactive) are evicted via time-based sweep to handle TLS ephemeral port accumulation
-- `flush_all()` clears the entire buffer map at EOF
-
-**Consumers processing many files** should open files lazily (one at a time) rather
-than using `Read::chain()` upfront, which keeps all file handles and decompression
-state alive for the entire run. With 50+ XZ-compressed dump files, eager chaining
-consumed 172MB of LZMA decoder state alone.
 
 ## CLI Tool
 
@@ -319,6 +295,10 @@ freeswitch-sofia-trace-parser profile.dump
 
 # Pipe from xzcat
 xzcat profile.dump.1.xz | freeswitch-sofia-trace-parser
+
+# Bulk scanning: skipping the CRC64 check cuts decompression by up to a third on
+# ARM64 (see docs/performance.md), at the cost of detecting no corruption
+xz -dc --ignore-check profile.dump.1.xz | freeswitch-sofia-trace-parser
 
 # Filter by method — shows INVITE requests and their 100/180/200 responses
 freeswitch-sofia-trace-parser -m INVITE profile.dump

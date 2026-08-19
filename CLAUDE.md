@@ -128,6 +128,18 @@ consider all 3 parsing levels. The parser aims for 100% accuracy — no missing 
 If a new dump file triggers errors, investigate the root cause across all levels before
 assuming malformed data and adding workarounds.
 
+## Performance Work
+
+Read [`docs/performance.md`](docs/performance.md) before profiling, benchmarking
+or optimizing anything here. It holds the measured baselines and the A/B
+protocol — output parity first, pinned core, interleaved runs, instruction
+counts and IPC rather than wall clock alone, which has repeatedly shown
+differences that reversed on re-run.
+
+Two standing traps it documents: xz decompression is the usual first suspect and
+has never been the bottleneck in a profile, and fewer instructions is not faster.
+New measurements go in that file, not in `design-rationale.md`.
+
 ## Key Design Decisions
 
 See [`docs/design-rationale.md`](docs/design-rationale.md) for the full
