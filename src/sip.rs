@@ -249,18 +249,19 @@ fn parse_request_line(line: &[u8]) -> Result<SipMessageType, ParseError> {
     Ok(SipMessageType::Request { method, uri })
 }
 
-fn bytes_to_string(b: &[u8]) -> String {
-    if b.is_ascii() {
-        // SAFETY: ASCII is a subset of UTF-8; is_ascii() guarantees all bytes < 128
-        unsafe { String::from_utf8_unchecked(b.to_vec()) }
-    } else {
-        String::from_utf8_lossy(b).into_owned()
+fn bytes_to_str(b: &[u8]) -> Cow<'_, str> {
+    match std::str::from_utf8(b) {
+        Ok(s) => Cow::Borrowed(s),
+        Err(_) => String::from_utf8_lossy(b),
     }
 }
 
+fn bytes_to_string(b: &[u8]) -> String {
+    bytes_to_str(b).into_owned()
+}
+
 fn parse_headers(data: &[u8]) -> Headers {
-    let text = String::from_utf8_lossy(data);
-    Headers(extract_all_headers(&text))
+    Headers(extract_all_headers(&bytes_to_str(data)))
 }
 
 /// Split at the `\r\n\r\n` header terminator. A terminator before
@@ -747,6 +748,16 @@ mod tests {
             content: content.to_vec(),
             frame_count: 1,
         }
+    }
+
+    #[test]
+    fn non_utf8_header_value_falls_back_to_lossy() {
+        let mut content = b"OPTIONS sip:host SIP/2.0\r\nSubject: caf".to_vec();
+        content.push(0xE9);
+        content.extend_from_slice(b"\r\nContent-Length: 0\r\n\r\n");
+
+        let parsed = make_sip_message(&content).parse().unwrap();
+        assert_eq!(parsed.header_value("Subject"), Some("caf\u{fffd}"));
     }
 
     #[test]
