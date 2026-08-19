@@ -270,6 +270,20 @@ classified by `SkipReason`:
 `ParseStats` exposes `bytes_read`, `bytes_skipped`, and detailed `UnparsedRegion` records
 with offset, length, and skip reason for each region.
 
+## Throughput
+
+184–500 MB/s per core parsing every message, depending on CPU and message mix;
+see [`docs/performance.md`](docs/performance.md) for measured figures across
+three microarchitectures, and for how to measure a change to the parser without
+fooling yourself.
+
+A consumer keeping a small fraction of a trace should reject before Level 3
+rather than filter after it. [`SipMessage::method`](src/sip.rs) reads the method
+from the reassembled bytes with no parse, and answers `None` rather than guess
+where the bytes do not settle it, so filtering on it drops only what it has
+classified. On an OPTIONS-dominated trace this cuts a filtered run roughly in
+half; the CLI's `--method`/`--exclude` use it.
+
 ## Memory Profile
 
 The parser is designed for constant-memory streaming of arbitrarily large inputs,
