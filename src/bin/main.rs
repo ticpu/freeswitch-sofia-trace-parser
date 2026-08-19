@@ -528,7 +528,7 @@ fn run_stats(
     }
 
     let mut methods: Vec<_> = method_counts.into_iter().collect();
-    methods.sort_by_key(|b| std::cmp::Reverse(b.1));
+    methods.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
     if !methods.is_empty() {
         println!("\nmethods:");
         for (method, count) in &methods {
@@ -652,7 +652,11 @@ fn run_dialog(
 
     // Output matched dialogs in chronological order
     let mut matched_messages: Vec<SipMessage> = Vec::new();
-    for (_, state) in dialogs {
+    // The timestamp sort below is stable, so HashMap order would otherwise
+    // decide how messages sharing a timestamp are interleaved.
+    let mut by_call_id: Vec<_> = dialogs.into_iter().collect();
+    by_call_id.sort_by(|a, b| a.0.cmp(&b.0));
+    for (_, state) in by_call_id {
         if state.matched {
             matched_messages.extend(state.messages);
         }
