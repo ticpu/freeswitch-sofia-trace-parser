@@ -129,19 +129,34 @@ struct CompiledFilters {
 }
 
 impl CompiledFilters {
-    fn is_excluded(&self, msg: &ParsedSipMessage) -> bool {
-        let method = msg.method().unwrap_or("");
-
+    fn excludes_method(&self, method: &str) -> bool {
         if self.exclude_options && method.eq_ignore_ascii_case("OPTIONS") {
             return true;
         }
 
-        if !self.excludes.is_empty() && self.excludes.iter().any(|m| m.eq_ignore_ascii_case(method))
-        {
-            return true;
-        }
+        !self.excludes.is_empty() && self.excludes.iter().any(|m| m.eq_ignore_ascii_case(method))
+    }
 
-        false
+    fn selects_method(&self, method: &str) -> bool {
+        self.methods.is_empty() || self.methods.iter().any(|m| m.eq_ignore_ascii_case(method))
+    }
+
+    fn is_excluded(&self, msg: &ParsedSipMessage) -> bool {
+        self.excludes_method(msg.method().unwrap_or(""))
+    }
+
+    /// `--exclude` and the default OPTIONS exclusion, settled from the
+    /// reassembled bytes. A message whose method those bytes do not settle is
+    /// kept, so `matches` still decides it after the parse.
+    fn excluded_before_parse(&self, msg: &SipMessage) -> bool {
+        msg.method().is_some_and(|m| self.excludes_method(m))
+    }
+
+    /// Also applies `--method`. Only for paths that discard what they do not
+    /// output: `--dialog` emits a matched dialog's other methods.
+    fn rejected_before_parse(&self, msg: &SipMessage) -> bool {
+        msg.method()
+            .is_some_and(|m| self.excludes_method(m) || !self.selects_method(m))
     }
 
     fn matches(&self, msg: &ParsedSipMessage) -> bool {
@@ -149,11 +164,8 @@ impl CompiledFilters {
             return false;
         }
 
-        if !self.methods.is_empty() {
-            let method = msg.method().unwrap_or("");
-            if !self.methods.iter().any(|m| m.eq_ignore_ascii_case(method)) {
-                return false;
-            }
+        if !self.selects_method(msg.method().unwrap_or("")) {
+            return false;
         }
 
         if let Some(ref re) = self.call_id {
@@ -554,9 +566,21 @@ fn run_filtered(
     filters: &CompiledFilters,
     capture_skipped: bool,
 ) -> ParseStats {
-    let mut iter = ParsedMessageIterator::new(reader).capture_skipped(capture_skipped);
+    let mut iter = MessageIterator::new(reader).capture_skipped(capture_skipped);
     for result in &mut iter {
-        match result {
+        let sip_msg = match result {
+            Ok(m) => m,
+            Err(ref e) => {
+                log_parse_error("message error", e);
+                continue;
+            }
+        };
+
+        if filters.rejected_before_parse(&sip_msg) {
+            continue;
+        }
+
+        match sip_msg.parse() {
             Ok(msg) => {
                 if !filters.matches(&msg) {
                     continue;
@@ -594,6 +618,10 @@ fn run_dialog(
                 continue;
             }
         };
+
+        if filters.excluded_before_parse(&sip_msg) {
+            continue;
+        }
 
         let parsed = match sip_msg.parse() {
             Ok(p) => p,
