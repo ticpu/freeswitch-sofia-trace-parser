@@ -5,7 +5,7 @@ use std::path::Path;
 use freeswitch_sofia_trace_parser::types::{
     ParseStats, SipMessageType, SkipReason, SkipTracking, Transport,
 };
-use freeswitch_sofia_trace_parser::{ParsedMessageIterator, ParsedSipMessage};
+use freeswitch_sofia_trace_parser::{MessageIterator, ParsedMessageIterator, ParsedSipMessage};
 
 fn sample_dir() -> &'static Path {
     Path::new("samples")
@@ -414,6 +414,54 @@ fn response_method_extraction() {
         ratio * 100.0
     );
     assert!(ratio > 0.99, "responses should extract method from CSeq");
+}
+
+/// `SipMessage::method` reads the method without parsing. Over the whole corpus
+/// it must never answer a method the full parse disagrees with; answering
+/// nothing is always allowed.
+#[test]
+fn cheap_method_agrees_with_parsed_method() {
+    for name in [
+        "esinet1-v4-tcp.dump.20",
+        "esinet1-v4-tcp.dump.4",
+        "esinet1-v4-udp.dump.20",
+        "esinet1-v6-tls.dump.180",
+        "internal-v4.dump.20",
+        "internal-v6.dump.20",
+    ] {
+        let path = sample_dir().join(name);
+        if !path.exists() {
+            eprintln!("skipping {name}: file not found");
+            continue;
+        }
+        let file = File::open(&path).unwrap();
+        let mut classified = 0usize;
+        let mut total = 0usize;
+        for msg in MessageIterator::new(file).flatten() {
+            total += 1;
+            let Some(cheap) = msg.method() else {
+                continue;
+            };
+            let cheap = cheap.to_string();
+            classified += 1;
+            let parsed = msg.parse().unwrap_or_else(|e| {
+                panic!("{name}: classified as {cheap} but failed to parse: {e}")
+            });
+            assert_eq!(
+                parsed.method(),
+                Some(cheap.as_str()),
+                "{name}: cheap method disagrees with parsed method"
+            );
+        }
+        eprintln!(
+            "{name}: {classified}/{total} classified without parsing ({:.1}%)",
+            classified as f64 / total as f64 * 100.0
+        );
+        assert!(
+            classified as f64 / total as f64 > 0.99,
+            "{name}: expected >99% of messages classifiable without a parse"
+        );
+    }
 }
 
 #[test]

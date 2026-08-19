@@ -750,6 +750,97 @@ mod tests {
         }
     }
 
+    /// `method()` may answer `None` for anything, but never a method the full
+    /// parse disagrees with.
+    fn assert_agrees_with_parse(content: &[u8]) {
+        let msg = make_sip_message(content);
+        if let Some(cheap) = msg.method() {
+            let parsed = msg.parse().expect("classified message must parse");
+            assert_eq!(Some(cheap), parsed.method());
+        }
+    }
+
+    #[test]
+    fn method_from_request_line() {
+        let msg = make_sip_message(b"INVITE sip:user@host SIP/2.0\r\nCSeq: 1 INVITE\r\n\r\n");
+        assert_eq!(msg.method(), Some("INVITE"));
+    }
+
+    #[test]
+    fn method_from_response_cseq() {
+        let msg = make_sip_message(b"SIP/2.0 200 OK\r\nVia: x\r\nCSeq: 42 OPTIONS\r\n\r\n");
+        assert_eq!(msg.method(), Some("OPTIONS"));
+    }
+
+    #[test]
+    fn method_from_response_cseq_name_variants() {
+        let lower = make_sip_message(b"SIP/2.0 200 OK\r\ncseq: 1 BYE\r\n\r\n");
+        assert_eq!(lower.method(), Some("BYE"));
+
+        let padded = make_sip_message(b"SIP/2.0 200 OK\r\nCSeq \t: 1 BYE\r\n\r\n");
+        assert_eq!(padded.method(), Some("BYE"));
+
+        let tabbed = make_sip_message(b"SIP/2.0 200 OK\r\nCSeq:\t1\tBYE\r\n\r\n");
+        assert_eq!(tabbed.method(), Some("BYE"));
+    }
+
+    #[test]
+    fn method_takes_first_cseq_in_wire_order() {
+        let msg = make_sip_message(b"SIP/2.0 200 OK\r\nCSeq: 1 BYE\r\nCSeq: 2 INVITE\r\n\r\n");
+        assert_eq!(msg.method(), Some("BYE"));
+        assert_agrees_with_parse(b"SIP/2.0 200 OK\r\nCSeq: 1 BYE\r\nCSeq: 2 INVITE\r\n\r\n");
+    }
+
+    #[test]
+    fn method_none_on_folded_cseq() {
+        let content = b"SIP/2.0 200 OK\r\nCSeq: 1\r\n INVITE\r\n\r\n";
+        assert_eq!(make_sip_message(content).method(), None);
+        assert_agrees_with_parse(content);
+    }
+
+    #[test]
+    fn method_none_without_cseq() {
+        let msg = make_sip_message(b"SIP/2.0 200 OK\r\nVia: x\r\n\r\nCSeq: 1 INVITE\r\n");
+        assert_eq!(msg.method(), None);
+    }
+
+    #[test]
+    fn method_none_on_malformed_start_line() {
+        assert_eq!(
+            make_sip_message(b"INVITE sip:user@host SIP/3.0\r\nCSeq: 1 INVITE\r\n\r\n").method(),
+            None
+        );
+        assert_eq!(make_sip_message(b"garbage\r\nCSeq: 1 INVITE\r\n\r\n").method(), None);
+        assert_eq!(make_sip_message(b"\r\n\r\n").method(), None);
+    }
+
+    /// The header crate stops at the first blank line as it splits on LF, so a
+    /// bare LF pair ends the header block earlier than `\r\n\r\n` does.
+    #[test]
+    fn method_none_when_cseq_follows_lf_blank_line() {
+        let content = b"SIP/2.0 200 OK\r\nVia: x\n\r\nCSeq: 1 OPTIONS\r\n\r\n";
+        assert_eq!(
+            make_sip_message(content).parse().unwrap().method(),
+            None,
+            "precondition: the parsed side cannot see this CSeq"
+        );
+        assert_eq!(make_sip_message(content).method(), None);
+    }
+
+    /// `ParsedSipMessage::method` splits the CSeq value on Unicode whitespace.
+    #[test]
+    fn method_none_on_non_ascii_cseq_value() {
+        let content = "SIP/2.0 200 OK\r\nCSeq: 1\u{a0}2 OPTIONS\r\n\r\n".as_bytes();
+        assert_eq!(make_sip_message(content).method(), None);
+        assert_agrees_with_parse(content);
+    }
+
+    #[test]
+    fn method_none_on_transport_noise() {
+        assert_eq!(make_sip_message(b"\r\n\r\n\r\n").method(), None);
+        assert_eq!(make_sip_message(b"").method(), None);
+    }
+
     #[test]
     fn non_utf8_header_value_falls_back_to_lossy() {
         let mut content = b"OPTIONS sip:host SIP/2.0\r\nSubject: caf".to_vec();
