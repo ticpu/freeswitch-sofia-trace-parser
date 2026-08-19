@@ -433,16 +433,15 @@ Perf profiling confirmed the bottleneck is CPU-bound — parsing, UTF-8
 validation, and allocation — not I/O. The optimizations below target
 the hot paths identified in profiling production dump files.
 
-### ASCII Fast Path for String Conversion
+### Level 2 Accessors Never Guess
 
-SIP is a text protocol. Every header name, value, method, URI, and
-status line this parser extracts is pure ASCII in production dumps.
-The original `bytes_to_string` ran the full UTF-8 state machine on
-every string, accounting for ~13% of CPU time between `from_utf8` and
-the lossy fallback. Since ASCII is a strict subset of UTF-8, an
-`is_ascii()` check (SIMD-accelerated on x86_64) lets us skip
-validation entirely for the common case. Non-ASCII content falls back
-to a single `from_utf8_lossy` pass.
+An accessor that answers from reassembled bytes rather than a parse
+answers nothing where the bytes leave it in doubt, and agrees with the
+parsed message everywhere else — down to the header-block boundary the
+header crate applies, which is stricter than the message's own. Both
+halves bind: a consumer filtering on one drops only what it has
+classified, and anything classified would have parsed, so rejecting
+before Level 3 hides no parse error.
 
 ### GrepFilter Zero-Copy Path
 
