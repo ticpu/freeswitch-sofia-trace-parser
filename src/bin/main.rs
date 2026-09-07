@@ -472,108 +472,132 @@ fn run_raw(reader: Box<dyn Read>, capture_skipped: bool) -> ParseStats {
     iter.parse_stats().clone()
 }
 
+#[derive(Default)]
+struct MessageStats {
+    method_counts: HashMap<String, usize>,
+    status_counts: HashMap<u16, usize>,
+    direction_counts: HashMap<Direction, usize>,
+    total: usize,
+    matched: usize,
+    errors: usize,
+    total_frames: usize,
+    multi_frame_msgs: usize,
+    max_frame_count: usize,
+    input: ParseStats,
+}
+
+impl MessageStats {
+    fn record(&mut self, msg: &ParsedSipMessage, matched: bool) {
+        self.total += 1;
+        self.total_frames += msg.frame_count;
+        if msg.frame_count > 1 {
+            self.multi_frame_msgs += 1;
+            self.max_frame_count = self.max_frame_count.max(msg.frame_count);
+        }
+        if !matched {
+            return;
+        }
+        self.matched += 1;
+        *self.direction_counts.entry(msg.direction).or_default() += 1;
+        match &msg.message_type {
+            SipMessageType::Request { method, .. } => {
+                *self.method_counts.entry(method.clone()).or_default() += 1;
+            }
+            SipMessageType::Response { code, .. } => {
+                *self.status_counts.entry(*code).or_default() += 1;
+                if let Some(method) = msg.method() {
+                    *self.method_counts.entry(method.to_string()).or_default() += 1;
+                }
+            }
+        }
+    }
+
+    fn record_error(&mut self) {
+        self.total += 1;
+        self.errors += 1;
+    }
+}
+
+impl std::fmt::Display for MessageStats {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        writeln!(f, "total: {}", self.total)?;
+        writeln!(f, "matched: {}", self.matched)?;
+        if self.errors > 0 {
+            writeln!(f, "parse errors: {}", self.errors)?;
+        }
+
+        if let Some(&n) = self.direction_counts.get(&Direction::Recv) {
+            writeln!(f, "recv: {n}")?;
+        }
+        if let Some(&n) = self.direction_counts.get(&Direction::Sent) {
+            writeln!(f, "sent: {n}")?;
+        }
+
+        writeln!(f, "\nreassembly:")?;
+        writeln!(f, "  frames: {}", self.total_frames)?;
+        writeln!(f, "  multi-frame messages: {}", self.multi_frame_msgs)?;
+        if self.max_frame_count > 1 {
+            writeln!(f, "  max frames per message: {}", self.max_frame_count)?;
+        }
+
+        let (read, skipped) = (self.input.bytes_read, self.input.bytes_skipped);
+        if read > 0 {
+            let parsed_pct = ((read - skipped) as f64 / read as f64) * 100.0;
+            writeln!(f, "\ninput:")?;
+            writeln!(f, "  bytes: {read}")?;
+            writeln!(
+                f,
+                "  parsed: {:.3}% ({}/{})",
+                parsed_pct,
+                read - skipped,
+                read
+            )?;
+            if skipped > 0 {
+                writeln!(f, "  skipped: {skipped} bytes")?;
+            }
+        }
+
+        let mut methods: Vec<_> = self.method_counts.iter().collect();
+        methods.sort_by(|a, b| b.1.cmp(a.1).then_with(|| a.0.cmp(b.0)));
+        if !methods.is_empty() {
+            writeln!(f, "\nmethods:")?;
+            for (method, count) in &methods {
+                writeln!(f, "  {method}: {count}")?;
+            }
+        }
+
+        let mut statuses: Vec<_> = self.status_counts.iter().collect();
+        statuses.sort_by_key(|&(code, _)| *code);
+        if !statuses.is_empty() {
+            writeln!(f, "\nresponse codes:")?;
+            for (code, count) in &statuses {
+                writeln!(f, "  {code}: {count}")?;
+            }
+        }
+
+        Ok(())
+    }
+}
+
 fn run_stats(
     reader: Box<dyn Read>,
     filters: &CompiledFilters,
     capture_skipped: bool,
 ) -> ParseStats {
-    let mut method_counts: HashMap<String, usize> = HashMap::new();
-    let mut status_counts: HashMap<u16, usize> = HashMap::new();
-    let mut direction_counts: HashMap<Direction, usize> = HashMap::new();
-    let mut total: usize = 0;
-    let mut matched: usize = 0;
-    let mut errors: usize = 0;
-    let mut total_frames: usize = 0;
-    let mut multi_frame_msgs: usize = 0;
-    let mut max_frame_count: usize = 0;
-
+    let mut counts = MessageStats::default();
     let mut iter = ParsedMessageIterator::new(reader).capture_skipped(capture_skipped);
     for result in &mut iter {
-        total += 1;
         match result {
             Ok(msg) => {
-                total_frames += msg.frame_count;
-                if msg.frame_count > 1 {
-                    multi_frame_msgs += 1;
-                    max_frame_count = max_frame_count.max(msg.frame_count);
-                }
-                if !filters.matches(&msg) {
-                    continue;
-                }
-                matched += 1;
-                *direction_counts.entry(msg.direction).or_default() += 1;
-                match &msg.message_type {
-                    SipMessageType::Request { method, .. } => {
-                        *method_counts.entry(method.clone()).or_default() += 1;
-                    }
-                    SipMessageType::Response { code, .. } => {
-                        *status_counts.entry(*code).or_default() += 1;
-                        if let Some(method) = msg.method() {
-                            *method_counts.entry(method.to_string()).or_default() += 1;
-                        }
-                    }
-                }
+                let matched = filters.matches(&msg);
+                counts.record(&msg, matched);
             }
-            Err(_) => errors += 1,
+            Err(_) => counts.record_error(),
         }
     }
-    let stats = iter.parse_stats().clone();
-
-    println!("total: {total}");
-    println!("matched: {matched}");
-    if errors > 0 {
-        println!("parse errors: {errors}");
-    }
-
-    if let Some(&n) = direction_counts.get(&Direction::Recv) {
-        println!("recv: {n}");
-    }
-    if let Some(&n) = direction_counts.get(&Direction::Sent) {
-        println!("sent: {n}");
-    }
-
-    println!("\nreassembly:");
-    println!("  frames: {total_frames}");
-    println!("  multi-frame messages: {multi_frame_msgs}");
-    if max_frame_count > 1 {
-        println!("  max frames per message: {max_frame_count}");
-    }
-
-    if stats.bytes_read > 0 {
-        let parsed_pct =
-            ((stats.bytes_read - stats.bytes_skipped) as f64 / stats.bytes_read as f64) * 100.0;
-        println!("\ninput:");
-        println!("  bytes: {}", stats.bytes_read);
-        println!(
-            "  parsed: {:.3}% ({}/{})",
-            parsed_pct,
-            stats.bytes_read - stats.bytes_skipped,
-            stats.bytes_read
-        );
-        if stats.bytes_skipped > 0 {
-            println!("  skipped: {} bytes", stats.bytes_skipped);
-        }
-    }
-
-    let mut methods: Vec<_> = method_counts.into_iter().collect();
-    methods.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
-    if !methods.is_empty() {
-        println!("\nmethods:");
-        for (method, count) in &methods {
-            println!("  {method}: {count}");
-        }
-    }
-
-    let mut statuses: Vec<_> = status_counts.into_iter().collect();
-    statuses.sort_by_key(|&(code, _)| code);
-    if !statuses.is_empty() {
-        println!("\nresponse codes:");
-        for (code, count) in &statuses {
-            println!("  {code}: {count}");
-        }
-    }
-
-    stats
+    counts.input = iter.parse_stats().clone();
+    print!("{counts}");
+    counts.input
 }
 
 fn run_filtered(
