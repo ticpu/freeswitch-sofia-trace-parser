@@ -1,3 +1,4 @@
 /target
+/torture/target
 /samples
 Cargo.lock

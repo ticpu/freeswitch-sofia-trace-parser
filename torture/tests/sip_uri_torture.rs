@@ -1,14 +1,11 @@
-#![cfg(feature = "torture-test")]
-
 use std::collections::HashMap;
-use std::fs;
 use std::path::Path;
-use std::sync::Mutex;
 
 use freeswitch_sofia_trace_parser::types::SipMessageType;
 use freeswitch_sofia_trace_parser::ParsedMessageIterator;
-use rayon::prelude::*;
-use sip_uri::{NameAddr, Uri};
+use freeswitch_sofia_trace_torture::{Corpus, Stats};
+use sip_header::SipHeaderAddr;
+use sip_uri::Uri;
 
 const NAMEADDR_HEADERS: &[&str] = &[
     "from",
@@ -32,6 +29,32 @@ struct UriStats {
     by_scheme: HashMap<String, usize>,
     by_header: HashMap<String, (usize, usize)>,
     failures: Vec<(String, String, String)>,
+}
+
+impl Stats for UriStats {
+    fn ok(&self) -> usize {
+        self.request_uri_ok + self.nameaddr_ok
+    }
+
+    fn total(&self) -> usize {
+        self.request_uri_total + self.nameaddr_total
+    }
+
+    fn merge(&mut self, other: Self) {
+        self.request_uri_total += other.request_uri_total;
+        self.request_uri_ok += other.request_uri_ok;
+        self.nameaddr_total += other.nameaddr_total;
+        self.nameaddr_ok += other.nameaddr_ok;
+        for (scheme, count) in other.by_scheme {
+            *self.by_scheme.entry(scheme).or_default() += count;
+        }
+        for (header, (ok, total)) in other.by_header {
+            let entry = self.by_header.entry(header).or_insert((0, 0));
+            entry.0 += ok;
+            entry.1 += total;
+        }
+        self.failures.extend(other.failures);
+    }
 }
 
 impl UriStats {
@@ -65,7 +88,7 @@ impl UriStats {
             .entry(header.to_lowercase())
             .or_insert((0, 0));
         entry.1 += 1;
-        match value.parse::<NameAddr>() {
+        match value.parse::<SipHeaderAddr>() {
             Ok(parsed) => {
                 self.nameaddr_ok += 1;
                 entry.0 += 1;
@@ -82,41 +105,13 @@ impl UriStats {
             }
         }
     }
-
-    fn total(&self) -> usize {
-        self.request_uri_total + self.nameaddr_total
-    }
-
-    fn ok(&self) -> usize {
-        self.request_uri_ok + self.nameaddr_ok
-    }
-
-    fn merge(&mut self, other: UriStats) {
-        self.request_uri_total += other.request_uri_total;
-        self.request_uri_ok += other.request_uri_ok;
-        self.nameaddr_total += other.nameaddr_total;
-        self.nameaddr_ok += other.nameaddr_ok;
-        for (scheme, count) in other.by_scheme {
-            *self.by_scheme.entry(scheme).or_default() += count;
-        }
-        for (header, (ok, total)) in other.by_header {
-            let entry = self.by_header.entry(header).or_insert((0, 0));
-            entry.0 += ok;
-            entry.1 += total;
-        }
-        self.failures.extend(other.failures);
-    }
 }
 
-fn sample_dir() -> &'static Path {
-    Path::new("samples")
-}
-
-fn parse_file_uris(name: &str) -> UriStats {
+fn parse_file_uris(path: &Path) -> UriStats {
     let mut stats = UriStats::default();
-    let path = sample_dir().join(name);
+    let name = path.file_name().unwrap_or_default().to_string_lossy();
 
-    let file = match fs::File::open(&path) {
+    let file = match std::fs::File::open(path) {
         Ok(f) => f,
         Err(_) => return stats,
     };
@@ -128,7 +123,7 @@ fn parse_file_uris(name: &str) -> UriStats {
         };
 
         if let SipMessageType::Request { ref uri, .. } = msg.message_type {
-            stats.record_request_uri(uri, name);
+            stats.record_request_uri(uri, &name);
         }
 
         for (header_name, header_value) in &msg.headers {
@@ -136,7 +131,7 @@ fn parse_file_uris(name: &str) -> UriStats {
                 .iter()
                 .any(|h| header_name.eq_ignore_ascii_case(h))
             {
-                stats.record_nameaddr(header_name, header_value, name);
+                stats.record_nameaddr(header_name, header_value, &name);
             }
         }
     }
@@ -145,59 +140,18 @@ fn parse_file_uris(name: &str) -> UriStats {
 }
 
 #[test]
-#[ignore]
 fn sip_uri_torture_all_samples() {
-    let dir = sample_dir();
-    if !dir.exists() {
-        eprintln!("samples/ directory not found, skipping");
-        return;
-    }
-
-    let mut entries: Vec<String> = fs::read_dir(dir)
-        .expect("read samples/")
-        .filter_map(|e| e.ok())
-        .filter_map(|e| {
-            let name = e.file_name().to_string_lossy().to_string();
-            if name.ends_with(".xz") {
-                return None;
-            }
-            if name.contains(".dump") {
-                Some(name)
-            } else {
-                None
-            }
-        })
-        .collect();
-    entries.sort();
-
-    if entries.is_empty() {
+    let corpus = Corpus::discover();
+    if corpus.is_empty() {
         eprintln!("no .dump files found in samples/, skipping");
         return;
     }
 
-    let per_file: Mutex<HashMap<String, (usize, usize)>> = Mutex::new(HashMap::new());
-
-    let file_stats: Vec<UriStats> = entries
-        .par_iter()
-        .map(|name| {
-            let stats = parse_file_uris(name);
-            if stats.total() > 0 {
-                per_file
-                    .lock()
-                    .unwrap()
-                    .insert(name.clone(), (stats.ok(), stats.total()));
-            }
-            stats
-        })
-        .collect();
-
-    let mut total = UriStats::default();
-    for stats in file_stats {
-        total.merge(stats);
-    }
-
     eprintln!("\n=== sip-uri torture test results ===");
-    eprintln!("files processed: {}", entries.len());
+    eprintln!("files processed: {}", corpus.len());
+
+    let total = corpus.run(parse_file_uris);
+
     eprintln!(
         "request URIs: {}/{} parsed",
         total.request_uri_ok, total.request_uri_total
@@ -226,7 +180,7 @@ fn sip_uri_torture_all_samples() {
 
     eprintln!("\nby header:");
     let mut headers: Vec<_> = total.by_header.iter().collect();
-    headers.sort_by(|a, b| b.1 .1.cmp(&a.1 .1));
+    headers.sort_by_key(|(_, (_, total))| std::cmp::Reverse(*total));
     for (header, (ok, hdr_total)) in &headers {
         let pct = if *hdr_total > 0 {
             *ok as f64 / *hdr_total as f64 * 100.0
@@ -242,19 +196,6 @@ fn sip_uri_torture_all_samples() {
             eprintln!("  [{file}] {input}");
             eprintln!("    error: {err}");
         }
-    }
-
-    eprintln!("\nper-file breakdown:");
-    let per_file = per_file.into_inner().unwrap();
-    let mut sorted_files: Vec<_> = per_file.iter().collect();
-    sorted_files.sort_by_key(|(name, _)| (*name).clone());
-    for (name, (ok, file_total)) in &sorted_files {
-        let pct = if *file_total > 0 {
-            *ok as f64 / *file_total as f64 * 100.0
-        } else {
-            0.0
-        };
-        eprintln!("  {name}: {ok}/{file_total} ({pct:.1}%)");
     }
 
     assert!(total.total() > 0, "expected to find URIs in trace samples");

@@ -1,0 +1,15 @@
+[package]
+name = "freeswitch-sofia-trace-torture"
+version = "0.1.0"
+edition = "2021"
+license = "GPL-3.0-only"
+publish = false
+
+[dependencies]
+freeswitch-sofia-trace-parser = { path = ".." }
+rayon = "1"
+
+[dev-dependencies]
+eido = { git = "https://gitlab.cauca.ca/cauca-public/eido", features = ["xml"] }
+sip-uri = "0.2"
+sip-header = "0.3"

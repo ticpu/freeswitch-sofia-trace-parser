@@ -1,13 +1,8 @@
-#![cfg(feature = "pidf-test")]
-
-use std::collections::HashMap;
-use std::fs;
 use std::path::Path;
-use std::sync::Mutex;
 
 use eido::pidf::Presence;
 use freeswitch_sofia_trace_parser::ParsedMessageIterator;
-use rayon::prelude::*;
+use freeswitch_sofia_trace_torture::{Corpus, Stats};
 
 #[derive(Default)]
 struct PidfStats {
@@ -16,6 +11,24 @@ struct PidfStats {
     pidf_parts: usize,
     pidf_ok: usize,
     failures: Vec<(String, String)>,
+}
+
+impl Stats for PidfStats {
+    fn ok(&self) -> usize {
+        self.pidf_ok
+    }
+
+    fn total(&self) -> usize {
+        self.pidf_parts
+    }
+
+    fn merge(&mut self, other: Self) {
+        self.invites += other.invites;
+        self.invites_with_pidf += other.invites_with_pidf;
+        self.pidf_parts += other.pidf_parts;
+        self.pidf_ok += other.pidf_ok;
+        self.failures.extend(other.failures);
+    }
 }
 
 impl PidfStats {
@@ -30,25 +43,13 @@ impl PidfStats {
             self.failures.push((file.to_string(), err));
         }
     }
-
-    fn merge(&mut self, other: PidfStats) {
-        self.invites += other.invites;
-        self.invites_with_pidf += other.invites_with_pidf;
-        self.pidf_parts += other.pidf_parts;
-        self.pidf_ok += other.pidf_ok;
-        self.failures.extend(other.failures);
-    }
 }
 
-fn sample_dir() -> &'static Path {
-    Path::new("samples")
-}
-
-fn parse_file_pidf(name: &str) -> PidfStats {
+fn parse_file_pidf(path: &Path) -> PidfStats {
     let mut stats = PidfStats::default();
-    let path = sample_dir().join(name);
+    let name = path.file_name().unwrap_or_default().to_string_lossy();
 
-    let file = match fs::File::open(&path) {
+    let file = match std::fs::File::open(path) {
         Ok(f) => f,
         Err(_) => return stats,
     };
@@ -85,14 +86,14 @@ fn parse_file_pidf(name: &str) -> PidfStats {
             let xml = match std::str::from_utf8(&part.body) {
                 Ok(s) => s,
                 Err(e) => {
-                    stats.record_failure(name, format!("UTF-8: {e}"));
+                    stats.record_failure(&name, format!("UTF-8: {e}"));
                     continue;
                 }
             };
 
             match Presence::from_xml(xml) {
                 Ok(_) => stats.record_success(),
-                Err(e) => stats.record_failure(name, e.to_string()),
+                Err(e) => stats.record_failure(&name, e.to_string()),
             }
         }
     }
@@ -101,59 +102,18 @@ fn parse_file_pidf(name: &str) -> PidfStats {
 }
 
 #[test]
-#[ignore]
 fn pidf_torture_all_samples() {
-    let dir = sample_dir();
-    if !dir.exists() {
-        eprintln!("samples/ directory not found, skipping");
-        return;
-    }
-
-    let mut entries: Vec<String> = fs::read_dir(dir)
-        .expect("read samples/")
-        .filter_map(|e| e.ok())
-        .filter_map(|e| {
-            let name = e.file_name().to_string_lossy().to_string();
-            if name.ends_with(".xz") {
-                return None;
-            }
-            if name.contains(".dump") {
-                Some(name)
-            } else {
-                None
-            }
-        })
-        .collect();
-    entries.sort();
-
-    if entries.is_empty() {
+    let corpus = Corpus::discover();
+    if corpus.is_empty() {
         eprintln!("no .dump files found in samples/, skipping");
         return;
     }
 
-    let per_file: Mutex<HashMap<String, (usize, usize, usize)>> = Mutex::new(HashMap::new());
-
-    let file_stats: Vec<PidfStats> = entries
-        .par_iter()
-        .map(|name| {
-            let stats = parse_file_pidf(name);
-            if stats.pidf_parts > 0 {
-                per_file.lock().unwrap().insert(
-                    name.clone(),
-                    (stats.invites, stats.invites_with_pidf, stats.pidf_ok),
-                );
-            }
-            stats
-        })
-        .collect();
-
-    let mut total = PidfStats::default();
-    for stats in file_stats {
-        total.merge(stats);
-    }
-
     eprintln!("\n=== PIDF-LO torture test results ===");
-    eprintln!("files processed: {}", entries.len());
+    eprintln!("files processed: {}", corpus.len());
+
+    let total = corpus.run(parse_file_pidf);
+
     eprintln!("INVITEs: {}", total.invites);
     eprintln!("INVITEs with PIDF: {}", total.invites_with_pidf);
     eprintln!(
@@ -172,14 +132,6 @@ fn pidf_torture_all_samples() {
         for (file, err) in &total.failures {
             eprintln!("  [{file}] {err}");
         }
-    }
-
-    eprintln!("\nper-file breakdown:");
-    let per_file = per_file.into_inner().unwrap();
-    let mut sorted_files: Vec<_> = per_file.iter().collect();
-    sorted_files.sort_by_key(|(name, _)| (*name).clone());
-    for (name, (invites, with_pidf, ok)) in &sorted_files {
-        eprintln!("  {name}: {invites} INVITEs, {with_pidf} with PIDF, {ok} parsed OK");
     }
 
     if total.pidf_parts > 0 {
