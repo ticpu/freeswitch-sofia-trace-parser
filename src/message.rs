@@ -66,7 +66,9 @@ impl<R: std::io::Read> MessageIterator<R> {
         }
     }
 
-    /// Enable capturing of skipped bytes in the underlying [`FrameIterator`].
+    /// Enable capturing of skipped bytes in the underlying [`FrameIterator`];
+    /// `false` selects [`SkipTracking::CountOnly`]. Whichever of this and
+    /// [`skip_tracking`](Self::skip_tracking) is called last wins.
     pub fn capture_skipped(mut self, enable: bool) -> Self {
         self.frames = self.frames.capture_skipped(enable);
         self

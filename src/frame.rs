@@ -345,11 +345,15 @@ impl<R: Read> FrameIterator<R> {
     }
 
     /// Enable capturing of skipped bytes (shorthand for
-    /// [`SkipTracking::CaptureData`]).
+    /// [`SkipTracking::CaptureData`]); `false` selects
+    /// [`SkipTracking::CountOnly`]. Whichever of this and
+    /// [`skip_tracking`](Self::skip_tracking) is called last wins.
     pub fn capture_skipped(mut self, enable: bool) -> Self {
-        if enable {
-            self.skip_tracking = SkipTracking::CaptureData;
-        }
+        self.skip_tracking = if enable {
+            SkipTracking::CaptureData
+        } else {
+            SkipTracking::CountOnly
+        };
         self
     }
 
