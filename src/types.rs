@@ -459,9 +459,12 @@ pub struct MimePart {
 }
 
 impl MimePart {
-    /// Returns the Content-Type header value, if present.
+    /// Returns the Content-Type header value. Checks both `Content-Type` and
+    /// the compact form `c`.
     pub fn content_type(&self) -> Option<&str> {
-        self.headers.value("Content-Type")
+        self.headers
+            .value("Content-Type")
+            .or_else(|| self.headers.value("c"))
     }
 
     /// Case-insensitive header lookup, first match in wire order.
