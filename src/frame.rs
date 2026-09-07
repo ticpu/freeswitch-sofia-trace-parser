@@ -270,6 +270,26 @@ pub fn parse_frame_header(data: &[u8]) -> Result<FrameHeader, ParseError> {
     })
 }
 
+enum HeaderParse {
+    Ok(FrameHeader),
+    NeedMore,
+    Invalid(ParseError),
+}
+
+/// Distinguish a header still arriving from one the parser rejects.
+fn classify_header(data: &[u8]) -> HeaderParse {
+    match parse_frame_header(data) {
+        Ok(header) => HeaderParse::Ok(header),
+        Err(e) => {
+            if memchr::memchr(b'\n', data).is_none() {
+                HeaderParse::NeedMore
+            } else {
+                HeaderParse::Invalid(e)
+            }
+        }
+    }
+}
+
 /// Check if data at given position looks like a valid frame header start.
 /// Used to validate `\x0B\n` boundaries.
 pub fn is_frame_header(data: &[u8]) -> bool {
@@ -551,9 +571,9 @@ impl<R: Read> Iterator for FrameIterator<R> {
             timestamp,
             header_len,
         } = loop {
-            match parse_frame_header(&self.buf) {
-                Ok(h) => break h,
-                Err(ParseError::InvalidHeader(ref msg)) if msg == "no newline in header" => {
+            match classify_header(&self.buf) {
+                HeaderParse::Ok(h) => break h,
+                HeaderParse::NeedMore => {
                     if self.eof {
                         debug!("truncated frame header at EOF");
                         let remaining = self.buf.len();
@@ -566,7 +586,7 @@ impl<R: Read> Iterator for FrameIterator<R> {
                         return Some(Err(ParseError::Io(e)));
                     }
                 }
-                Err(e) => {
+                HeaderParse::Invalid(e) => {
                     let header_preview: String = self
                         .buf
                         .iter()
