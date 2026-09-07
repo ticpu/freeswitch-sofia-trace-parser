@@ -166,15 +166,28 @@ fn parse_time_part(bytes: &[u8]) -> Option<(u8, u8, u8, u32)> {
     Some((hour, min, sec, usec))
 }
 
+/// Fields of one frame header line.
+#[derive(Debug)]
+pub struct FrameHeader {
+    /// Whether FreeSWITCH received or sent the frame.
+    pub direction: Direction,
+    /// Content length declared by the header.
+    pub byte_count: usize,
+    /// Transport the frame travelled over.
+    pub transport: Transport,
+    /// Remote address, as written in the header.
+    pub address: String,
+    /// Time the frame was written.
+    pub timestamp: Timestamp,
+    /// Header length in bytes, including the trailing `\n`.
+    pub header_len: usize,
+}
+
 /// Parse a frame header line from `&[u8]`.
 ///
 /// Expected format:
 /// `(recv|sent) <N> bytes (from|to) <transport>/<address> at <timestamp>:\n`
-///
-/// Returns `(Frame header fields, header_len)` where header_len includes the trailing `\n`.
-pub fn parse_frame_header(
-    data: &[u8],
-) -> Result<(Direction, usize, Transport, String, Timestamp, usize), ParseError> {
+pub fn parse_frame_header(data: &[u8]) -> Result<FrameHeader, ParseError> {
     let newline_pos = memchr::memchr(b'\n', data)
         .ok_or_else(|| ParseError::InvalidHeader("no newline in header".into()))?;
     let line = &data[..newline_pos];
@@ -247,14 +260,14 @@ pub fn parse_frame_header(
     let timestamp = parse_timestamp(&line[pos..])
         .ok_or_else(|| ParseError::InvalidHeader("invalid timestamp".into()))?;
 
-    Ok((
+    Ok(FrameHeader {
         direction,
         byte_count,
         transport,
         address,
         timestamp,
-        newline_pos + 1,
-    ))
+        header_len: newline_pos + 1,
+    })
 }
 
 /// Check if data at given position looks like a valid frame header start.
@@ -530,7 +543,14 @@ impl<R: Read> Iterator for FrameIterator<R> {
         }
 
         // Parse frame header — may need more data if header spans buffer boundary
-        let (direction, byte_count, transport, address, timestamp, header_len) = loop {
+        let FrameHeader {
+            direction,
+            byte_count,
+            transport,
+            address,
+            timestamp,
+            header_len,
+        } = loop {
             match parse_frame_header(&self.buf) {
                 Ok(h) => break h,
                 Err(ParseError::InvalidHeader(ref msg)) if msg == "no newline in header" => {
@@ -739,13 +759,13 @@ mod tests {
     #[test]
     fn parse_recv_ipv4_tcp() {
         let header = b"recv 100 bytes from tcp/192.168.1.1:5060 at 00:00:01.350874:\n";
-        let (dir, count, transport, addr, ts, len) = parse_frame_header(header).unwrap();
-        assert_eq!(dir, Direction::Recv);
-        assert_eq!(count, 100);
-        assert_eq!(transport, Transport::Tcp);
-        assert_eq!(addr, "192.168.1.1:5060");
+        let h = parse_frame_header(header).unwrap();
+        assert_eq!(h.direction, Direction::Recv);
+        assert_eq!(h.byte_count, 100);
+        assert_eq!(h.transport, Transport::Tcp);
+        assert_eq!(h.address, "192.168.1.1:5060");
         assert_eq!(
-            ts,
+            h.timestamp,
             Timestamp::TimeOnly {
                 hour: 0,
                 min: 0,
@@ -753,19 +773,19 @@ mod tests {
                 usec: 350874
             }
         );
-        assert_eq!(len, header.len());
+        assert_eq!(h.header_len, header.len());
     }
 
     #[test]
     fn parse_recv_ipv6_tcp() {
         let header = b"recv 1440 bytes from tcp/[2001:4958:10:14::4]:30046 at 13:03:21.674883:\n";
-        let (dir, count, transport, addr, ts, _) = parse_frame_header(header).unwrap();
-        assert_eq!(dir, Direction::Recv);
-        assert_eq!(count, 1440);
-        assert_eq!(transport, Transport::Tcp);
-        assert_eq!(addr, "[2001:4958:10:14::4]:30046");
+        let h = parse_frame_header(header).unwrap();
+        assert_eq!(h.direction, Direction::Recv);
+        assert_eq!(h.byte_count, 1440);
+        assert_eq!(h.transport, Transport::Tcp);
+        assert_eq!(h.address, "[2001:4958:10:14::4]:30046");
         assert_eq!(
-            ts,
+            h.timestamp,
             Timestamp::TimeOnly {
                 hour: 13,
                 min: 3,
@@ -778,36 +798,36 @@ mod tests {
     #[test]
     fn parse_sent_ipv6_tcp() {
         let header = b"sent 681 bytes to tcp/[2001:4958:10:14::4]:30046 at 13:03:21.675500:\n";
-        let (dir, count, transport, addr, _, _) = parse_frame_header(header).unwrap();
-        assert_eq!(dir, Direction::Sent);
-        assert_eq!(count, 681);
-        assert_eq!(transport, Transport::Tcp);
-        assert_eq!(addr, "[2001:4958:10:14::4]:30046");
+        let h = parse_frame_header(header).unwrap();
+        assert_eq!(h.direction, Direction::Sent);
+        assert_eq!(h.byte_count, 681);
+        assert_eq!(h.transport, Transport::Tcp);
+        assert_eq!(h.address, "[2001:4958:10:14::4]:30046");
     }
 
     #[test]
     fn parse_recv_udp() {
         let header = b"recv 457 bytes from udp/10.0.0.1:5060 at 00:19:47.123456:\n";
-        let (dir, _, transport, _, _, _) = parse_frame_header(header).unwrap();
-        assert_eq!(dir, Direction::Recv);
-        assert_eq!(transport, Transport::Udp);
+        let h = parse_frame_header(header).unwrap();
+        assert_eq!(h.direction, Direction::Recv);
+        assert_eq!(h.transport, Transport::Udp);
     }
 
     #[test]
     fn parse_sent_tls() {
         let header = b"sent 500 bytes to tls/10.0.0.1:5061 at 12:00:00.000000:\n";
-        let (dir, count, transport, _, _, _) = parse_frame_header(header).unwrap();
-        assert_eq!(dir, Direction::Sent);
-        assert_eq!(count, 500);
-        assert_eq!(transport, Transport::Tls);
+        let h = parse_frame_header(header).unwrap();
+        assert_eq!(h.direction, Direction::Sent);
+        assert_eq!(h.byte_count, 500);
+        assert_eq!(h.transport, Transport::Tls);
     }
 
     #[test]
     fn parse_full_datetime_timestamp() {
         let header = b"recv 100 bytes from tcp/192.168.1.1:5060 at 2026-02-01 10:00:00.000000:\n";
-        let (_, _, _, _, ts, _) = parse_frame_header(header).unwrap();
+        let h = parse_frame_header(header).unwrap();
         assert_eq!(
-            ts,
+            h.timestamp,
             Timestamp::DateTime {
                 year: 2026,
                 month: 2,
