@@ -1,19 +1,14 @@
 use std::collections::{HashMap, VecDeque};
-use std::sync::LazyLock;
 
-use memchr::memmem;
 use tracing::{debug, trace, warn};
 
+use crate::finders::{CRLF, CRLFCRLF};
 use crate::frame::{FrameIterator, ParseError};
 use crate::sip::{sip_start, SipStart};
 use crate::types::{
     Direction, ParseStats, SipMessage, SkipTracking, StaleClock, Timestamp, Transport,
     UnparsedRegion,
 };
-
-static CRLF: LazyLock<memmem::Finder<'static>> = LazyLock::new(|| memmem::Finder::new(b"\r\n"));
-static CRLFCRLF: LazyLock<memmem::Finder<'static>> =
-    LazyLock::new(|| memmem::Finder::new(b"\r\n\r\n"));
 
 /// Level 2 streaming parser: reassembles TCP segments into complete SIP messages.
 ///

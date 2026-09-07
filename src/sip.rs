@@ -1,19 +1,15 @@
 use std::borrow::Cow;
-use std::sync::LazyLock;
 
 use memchr::memmem;
 use sip_header::extract_all_headers;
 
+use crate::finders::{CRLF, CRLFCRLF};
 use crate::frame::ParseError;
 use crate::message::MessageIterator;
 use crate::types::{
     Headers, MimePart, ParseStats, ParsedSipMessage, SipFragment, SipMessage, SipMessageType,
     SkipTracking, UnparsedRegion,
 };
-
-static CRLF: LazyLock<memmem::Finder<'static>> = LazyLock::new(|| memmem::Finder::new(b"\r\n"));
-static CRLFCRLF: LazyLock<memmem::Finder<'static>> =
-    LazyLock::new(|| memmem::Finder::new(b"\r\n\r\n"));
 
 impl SipMessage {
     /// Parse this reassembled message into a [`ParsedSipMessage`] with typed

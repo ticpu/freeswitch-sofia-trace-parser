@@ -41,6 +41,8 @@
 //! [`SkipReason`]. Access parse statistics via the `stats()` / `parse_stats()`
 //! methods on each iterator. See [`ParseStats`] and [`SkipTracking`] for details.
 
+mod finders;
+
 /// Level 1: frame boundary detection and header parsing.
 pub mod frame;
 

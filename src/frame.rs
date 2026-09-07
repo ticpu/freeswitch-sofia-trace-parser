@@ -1,8 +1,10 @@
+use std::fmt;
 use std::io::Read;
 
 use memchr::memmem;
 use tracing::{debug, info, trace, warn};
 
+use crate::finders::BOUNDARY;
 use crate::types::{
     Direction, Frame, ParseStats, SkipReason, SkipTracking, Timestamp, Transport, UnparsedRegion,
 };
@@ -69,8 +71,6 @@ impl From<std::io::Error> for ParseError {
         ParseError::Io(e)
     }
 }
-
-use std::fmt;
 
 fn digit(b: u8) -> Option<u8> {
     match b {
@@ -412,10 +412,9 @@ impl<R: Read> FrameIterator<R> {
 
     /// Find the next `\x0B\n` boundary that is followed by a valid frame header.
     fn find_boundary(&self, start: usize) -> Option<usize> {
-        let finder = memmem::Finder::new(b"\x0B\n");
         let mut search_from = start;
         loop {
-            let pos = finder.find(&self.buf[search_from..])?;
+            let pos = BOUNDARY.find(&self.buf[search_from..])?;
             let abs_pos = search_from + pos;
             let after = abs_pos + 2;
             if after >= self.buf.len() {
@@ -444,10 +443,9 @@ impl<R: Read> FrameIterator<R> {
             return Some(0);
         }
         // Look for \x0B\n followed by a valid header
-        let finder = memmem::Finder::new(b"\x0B\n");
         let mut search_from = 0;
         loop {
-            let pos = finder.find(&self.buf[search_from..])?;
+            let pos = BOUNDARY.find(&self.buf[search_from..])?;
             let abs_pos = search_from + pos;
             let after = abs_pos + 2;
             if after < self.buf.len() && is_frame_header(&self.buf[after..]) {
