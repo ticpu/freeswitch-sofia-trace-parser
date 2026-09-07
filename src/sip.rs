@@ -343,15 +343,23 @@ fn parse_headers(data: &[u8]) -> Headers {
     Headers(extract_all_headers(&bytes_to_str(data)))
 }
 
-/// Split at the `\r\n\r\n` header terminator. A terminator before
-/// `headers_start` means the blank line terminates the start line: no headers,
-/// body follows. No terminator means headers run to the end, no body.
+/// Split at the first blank line, under the rule `sip_header` reads headers by:
+/// lines end at LF, one trailing CR is stripped, the first empty line ends the
+/// block. No blank line means headers run to the end, no body.
 fn split_headers_body(data: &[u8], headers_start: usize) -> (&[u8], &[u8]) {
-    match CRLFCRLF.find(data) {
-        Some(pos) if pos >= headers_start => (&data[headers_start..pos], &data[pos + 4..]),
-        Some(pos) => (&[][..], &data[pos + 4..]),
-        None => (&data[headers_start.min(data.len())..], &[][..]),
+    let start = headers_start.min(data.len());
+    let mut pos = start;
+    while let Some(rel) = memchr::memchr(b'\n', &data[pos..]) {
+        let line = match &data[pos..pos + rel] {
+            [rest @ .., b'\r'] => rest,
+            rest => rest,
+        };
+        if line.is_empty() {
+            return (&data[start..pos], &data[pos + rel + 1..]);
+        }
+        pos += rel + 1;
     }
+    (&data[start..], &[][..])
 }
 
 /// Parse a `message/sipfrag` body (RFC 3420) — any prefix of a SIP message.
