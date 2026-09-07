@@ -365,12 +365,8 @@ fn format_summary(msg: &ParsedSipMessage) -> String {
 
 fn format_frame_header(msg: &ParsedSipMessage) -> String {
     format!(
-        "{} {} {}/{} at {} ({} frames) {}",
-        msg.direction,
-        msg.direction.preposition(),
-        msg.transport,
-        msg.address,
-        msg.timestamp,
+        "{} ({} frames) {}",
+        msg.meta(),
         msg.frame_count,
         msg.message_type.summary(),
     )
@@ -439,12 +435,8 @@ fn run_raw(reader: Box<dyn Read>, capture_skipped: bool) -> ParseStats {
         match result {
             Ok(msg) => {
                 println!(
-                    "{} {} {}/{} at {} ({} frames, {} bytes)",
-                    msg.direction,
-                    msg.direction.preposition(),
-                    msg.transport,
-                    msg.address,
-                    msg.timestamp,
+                    "{} ({} frames, {} bytes)",
+                    msg.meta(),
                     msg.frame_count,
                     msg.content.len(),
                 );

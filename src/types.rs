@@ -19,10 +19,12 @@ fn parse_socket_addr(address: &str) -> Option<SocketAddr> {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SkipReason {
     /// Truncated frame at the start of a file, typically from logrotate
-    /// cutting mid-write. Capped at 65,535 bytes.
+    /// cutting mid-write. Capped at 65,537 bytes: the largest datagram plus
+    /// the two-byte boundary.
     PartialFirstFrame,
-    /// Skip region exceeds 65,535 bytes at file start, indicating the input
-    /// is not a dump file (e.g., compressed or binary data).
+    /// Skip region exceeds 65,537 bytes, at file start or mid-stream,
+    /// indicating the input is not a dump file (e.g., compressed or binary
+    /// data).
     OversizedFrame,
     /// Unrecoverable bytes skipped between valid frames mid-stream.
     MidStreamSkip,
@@ -342,6 +344,46 @@ impl fmt::Display for Timestamp {
     }
 }
 
+/// The transport metadata every level carries: who the peer was, over what,
+/// in which direction, and when.
+///
+/// Borrows the address from the frame or message it describes, so it costs no
+/// allocation and cannot drift from its source.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FrameMeta<'a> {
+    /// Whether the frame was received or sent.
+    pub direction: Direction,
+    /// Transport protocol.
+    pub transport: Transport,
+    /// Remote address as recorded in the frame header.
+    pub address: &'a str,
+    /// When the frame was logged.
+    pub timestamp: Timestamp,
+}
+
+impl FrameMeta<'_> {
+    /// The remote address as a typed [`SocketAddr`], preserving family and
+    /// port. `None` when the recorded address is not `ip:port`; the raw string
+    /// remains in [`address`](Self::address).
+    pub fn socket_addr(&self) -> Option<SocketAddr> {
+        parse_socket_addr(self.address)
+    }
+}
+
+impl fmt::Display for FrameMeta<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "{} {} {}/{} at {}",
+            self.direction,
+            self.direction.preposition(),
+            self.transport,
+            self.address,
+            self.timestamp
+        )
+    }
+}
+
 /// A single frame from the dump file (Level 1 output).
 ///
 /// Each frame corresponds to one `send()` or `recv()` call logged by
@@ -364,11 +406,21 @@ pub struct Frame {
 }
 
 impl Frame {
+    /// Direction, transport, address and timestamp as one borrowed value.
+    pub fn meta(&self) -> FrameMeta<'_> {
+        FrameMeta {
+            direction: self.direction,
+            transport: self.transport,
+            address: &self.address,
+            timestamp: self.timestamp,
+        }
+    }
+
     /// The remote address as a typed [`SocketAddr`], preserving family and
     /// port. `None` when the recorded address is not `ip:port`; the raw string
     /// remains in [`address`](Self::address).
     pub fn socket_addr(&self) -> Option<SocketAddr> {
-        parse_socket_addr(&self.address)
+        self.meta().socket_addr()
     }
 }
 
@@ -393,11 +445,21 @@ pub struct SipMessage {
 }
 
 impl SipMessage {
+    /// Direction, transport, address and timestamp as one borrowed value.
+    pub fn meta(&self) -> FrameMeta<'_> {
+        FrameMeta {
+            direction: self.direction,
+            transport: self.transport,
+            address: &self.address,
+            timestamp: self.timestamp,
+        }
+    }
+
     /// The remote address as a typed [`SocketAddr`], preserving family and
     /// port. `None` when the recorded address is not `ip:port`; the raw string
     /// remains in [`address`](Self::address).
     pub fn socket_addr(&self) -> Option<SocketAddr> {
-        parse_socket_addr(&self.address)
+        self.meta().socket_addr()
     }
 }
 
@@ -589,11 +651,21 @@ impl MimePart {
 }
 
 impl ParsedSipMessage {
+    /// Direction, transport, address and timestamp as one borrowed value.
+    pub fn meta(&self) -> FrameMeta<'_> {
+        FrameMeta {
+            direction: self.direction,
+            transport: self.transport,
+            address: &self.address,
+            timestamp: self.timestamp,
+        }
+    }
+
     /// The remote address as a typed [`SocketAddr`], preserving family and
     /// port. `None` when the recorded address is not `ip:port`; the raw string
     /// remains in [`address`](Self::address).
     pub fn socket_addr(&self) -> Option<SocketAddr> {
-        parse_socket_addr(&self.address)
+        self.meta().socket_addr()
     }
 
     /// Returns the Call-ID header value. Checks both `Call-ID` and
