@@ -10,7 +10,7 @@ use tracing::{debug, warn};
 use freeswitch_sofia_trace_parser::types::{Direction, SipMessageType};
 use freeswitch_sofia_trace_parser::{
     FrameIterator, GrepFilter, MessageIterator, ParseError, ParseStats, ParsedMessageIterator,
-    ParsedSipMessage, SipMessage,
+    ParsedSipMessage, SipMessage, StaleClock,
 };
 
 mod pcap;
@@ -598,6 +598,23 @@ struct DialogState {
     matched: bool,
     saw_bye: bool,
     saw_bye_response: bool,
+    ended: bool,
+    last_seen: u64,
+}
+
+/// A response that ends the INVITE transaction it answers without a dialog.
+fn is_invite_failure(parsed: &ParsedSipMessage) -> bool {
+    let SipMessageType::Response { code, .. } = &parsed.message_type else {
+        return false;
+    };
+    // An auth challenge is answered by a re-sent INVITE on the same Call-ID.
+    if matches!(code, 401 | 407) {
+        return false;
+    }
+    (400..700).contains(code)
+        && parsed
+            .method()
+            .is_some_and(|m| m.eq_ignore_ascii_case("INVITE"))
 }
 
 fn run_dialog(
@@ -607,6 +624,7 @@ fn run_dialog(
     capture_skipped: bool,
 ) -> ParseStats {
     let mut dialogs: HashMap<String, DialogState> = HashMap::new();
+    let mut clock = StaleClock::new();
 
     let mut iter = MessageIterator::new(reader).capture_skipped(capture_skipped);
     // Single pass: collect messages by Call-ID, track matches
@@ -640,6 +658,16 @@ fn run_dialog(
             None => continue,
         };
 
+        let now = clock.observe(sip_msg.timestamp);
+        if clock.sweep_due() {
+            let before = dialogs.len();
+            dialogs.retain(|_, state| state.matched || !clock.is_stale(state.last_seen));
+            let dropped = before - dialogs.len();
+            if dropped > 0 {
+                debug!(dialogs = dropped, "dropped stale unmatched dialogs");
+            }
+        }
+
         let is_match = filters.matches(&parsed);
 
         // Detect BYE and BYE responses for pruning
@@ -653,13 +681,23 @@ fn run_dialog(
                 .map(|m| m.eq_ignore_ascii_case("BYE"))
                 .unwrap_or(false);
 
-        let state = dialogs.entry(call_id).or_insert_with(|| DialogState {
-            messages: Vec::new(),
-            matched: false,
-            saw_bye: false,
-            saw_bye_response: false,
-        });
+        let is_cancel = matches!(
+            &parsed.message_type,
+            SipMessageType::Request { method, .. } if method.eq_ignore_ascii_case("CANCEL")
+        );
 
+        let state = dialogs
+            .entry(call_id.clone())
+            .or_insert_with(|| DialogState {
+                messages: Vec::new(),
+                matched: false,
+                saw_bye: false,
+                saw_bye_response: false,
+                ended: false,
+                last_seen: now,
+            });
+
+        state.last_seen = now;
         if is_match {
             state.matched = true;
         }
@@ -669,12 +707,16 @@ fn run_dialog(
         if is_bye_response {
             state.saw_bye_response = true;
         }
+        if is_cancel || is_invite_failure(&parsed) {
+            state.ended = true;
+        }
 
         state.messages.push(sip_msg);
 
         // Prune: dialog terminated and never matched
-        if state.saw_bye && state.saw_bye_response && !state.matched {
-            dialogs.remove(parsed.call_id().unwrap());
+        let terminated = state.ended || (state.saw_bye && state.saw_bye_response);
+        if terminated && !state.matched {
+            dialogs.remove(&call_id);
         }
     }
 
