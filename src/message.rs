@@ -240,7 +240,7 @@ impl<R: std::io::Read> Iterator for MessageIterator<R> {
                     let msgs = extract_complete(buf, &key);
                     self.ready.extend(msgs);
 
-                    if buf.frame_count == 0 && buf.content.is_empty() {
+                    if buf.content.is_empty() {
                         self.buffers.remove(&key);
                     }
 
@@ -287,6 +287,7 @@ fn extract_complete(buf: &mut ConnectionBuffer, key: &(Direction, String)) -> Ve
                         "drained transport whitespace"
                     );
                     buf.content.clear();
+                    buf.frame_count = 0;
                     break;
                 }
                 if is_sip_start(&buf.content[ws_len..]) {
