@@ -35,7 +35,6 @@ use std::collections::HashMap;
 use std::fmt;
 use std::io::{self, Write};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
-use std::str::FromStr;
 
 use crate::types::{
     days_from_civil, Direction, Frame, FrameMeta, ParsedSipMessage, SipMessage, Timestamp,
@@ -96,11 +95,10 @@ pub struct PcapConfig {
 
 impl Default for PcapConfig {
     fn default() -> Self {
-        // RFC 5737 TEST-NET-1 / RFC 3849 documentation prefix. Both are
-        // structurally-valid `SocketAddr` literals; the unwraps are infallible.
+        // RFC 5737 TEST-NET-1 / RFC 3849 documentation prefix.
         Self {
-            local_v4: SocketAddr::from_str("192.0.2.1:5060").unwrap(),
-            local_v6: SocketAddr::from_str("[2001:db8::1]:5060").unwrap(),
+            local_v4: SocketAddr::from((Ipv4Addr::new(192, 0, 2, 1), 5060)),
+            local_v6: SocketAddr::from((Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 1), 5060)),
             date_base: None,
             layer: PcapLayer::Transport,
         }
@@ -254,16 +252,18 @@ impl<W: Write> PcapWriter<W> {
                 SocketAddr::V6(_) => self.config.local_v6,
             },
         };
-        if remote.is_ipv4() != local.is_ipv4() {
-            return Err(PcapError::AddressFamilyMismatch);
-        }
         let (src, dst) = match meta.direction {
             Direction::Recv => (remote, local),
             Direction::Sent => (local, remote),
         };
+        let ips = match (src.ip(), dst.ip()) {
+            (IpAddr::V4(s), IpAddr::V4(d)) => IpPair::V4(s, d),
+            (IpAddr::V6(s), IpAddr::V6(d)) => IpPair::V6(s, d),
+            _ => return Err(PcapError::AddressFamilyMismatch),
+        };
         let (ts_sec, ts_usec) = timestamp_to_unix(meta.timestamp, self.config.date_base);
 
-        let max = payload_limit(self.config.layer, remote.ip(), meta.transport);
+        let max = payload_limit(self.config.layer, ips, meta.transport);
         let payload_len = match u16::try_from(payload.len()) {
             Ok(len) if payload.len() <= max => len,
             _ => {
@@ -275,8 +275,8 @@ impl<W: Write> PcapWriter<W> {
         };
 
         let packet = match self.config.layer {
-            PcapLayer::Network => build_layer3(src.ip(), dst.ip(), payload, payload_len),
-            PcapLayer::Transport => self.build_layer4(meta, src, dst, payload, payload_len),
+            PcapLayer::Network => build_layer3(ips, payload, payload_len),
+            PcapLayer::Transport => self.build_layer4(meta, ips, src, dst, payload, payload_len),
         };
 
         let mut rec = [0u8; 16];
@@ -293,13 +293,14 @@ impl<W: Write> PcapWriter<W> {
     fn build_layer4(
         &mut self,
         meta: FrameMeta<'_>,
+        ips: IpPair,
         src: SocketAddr,
         dst: SocketAddr,
         payload: &[u8],
         payload_len: u16,
     ) -> Vec<u8> {
         let direction = meta.direction;
-        let mut out = sll_header(direction, ip_family_ethertype(src.ip()));
+        let mut out = sll_header(direction, ips.ethertype());
 
         let (transport_proto, segment_len, transport_segment) = match meta.transport {
             Transport::Udp => {
@@ -307,7 +308,7 @@ impl<W: Write> PcapWriter<W> {
                 (
                     IP_PROTO_UDP,
                     segment_len,
-                    build_udp(src, dst, payload, segment_len),
+                    build_udp(ips, src.port(), dst.port(), payload, segment_len),
                 )
             }
             Transport::Tcp | Transport::Tls | Transport::Wss => {
@@ -318,7 +319,7 @@ impl<W: Write> PcapWriter<W> {
                     Direction::Recv => (conn.recv_seq, conn.sent_seq),
                 };
                 let segment_len = payload_len.saturating_add(TCP_HEADER_LEN);
-                let seg = build_tcp(src, dst, seq, ack, payload, segment_len);
+                let seg = build_tcp(ips, src.port(), dst.port(), seq, ack, payload, segment_len);
                 let advance = payload_len as u32;
                 match direction {
                     Direction::Sent => conn.sent_seq = conn.sent_seq.wrapping_add(advance),
@@ -328,7 +329,7 @@ impl<W: Write> PcapWriter<W> {
             }
         };
 
-        let ip = build_ip(src.ip(), dst.ip(), transport_proto, segment_len);
+        let ip = build_ip(ips, transport_proto, segment_len);
         out.extend_from_slice(&ip);
         out.extend_from_slice(&transport_segment);
         out
@@ -337,10 +338,10 @@ impl<W: Write> PcapWriter<W> {
 
 /// Largest payload a packet of this shape carries: what the IP family's length
 /// field holds after its headers, bounded by the advertised snaplen.
-fn payload_limit(layer: PcapLayer, ip: IpAddr, transport: Transport) -> usize {
-    let ip_header = match ip {
-        IpAddr::V4(_) => IPV4_HEADER_LEN,
-        IpAddr::V6(_) => IPV6_HEADER_LEN,
+fn payload_limit(layer: PcapLayer, ips: IpPair, transport: Transport) -> usize {
+    let ip_header = match ips {
+        IpPair::V4(..) => IPV4_HEADER_LEN,
+        IpPair::V6(..) => IPV6_HEADER_LEN,
     };
     let (link_header, transport_header) = match layer {
         PcapLayer::Network => (0, 0),
@@ -350,18 +351,28 @@ fn payload_limit(layer: PcapLayer, ip: IpAddr, transport: Transport) -> usize {
         },
     };
     // IPv4 counts its own header in the field; IPv6 counts only what follows.
-    let ip_field = match ip {
-        IpAddr::V4(_) => u16::MAX - ip_header,
-        IpAddr::V6(_) => u16::MAX,
+    let ip_field = match ips {
+        IpPair::V4(..) => u16::MAX - ip_header,
+        IpPair::V6(..) => u16::MAX,
     };
     let snaplen = PCAP_SNAPLEN.saturating_sub((link_header + ip_header + transport_header) as u32);
     (ip_field.saturating_sub(transport_header) as usize).min(snaplen as usize)
 }
 
-fn ip_family_ethertype(ip: IpAddr) -> u16 {
-    match ip {
-        IpAddr::V4(_) => ETHERTYPE_IPV4,
-        IpAddr::V6(_) => ETHERTYPE_IPV6,
+/// A source/destination pair of the same IP family, so every layer below
+/// takes the validation done once in `emit` for granted.
+#[derive(Debug, Clone, Copy)]
+enum IpPair {
+    V4(Ipv4Addr, Ipv4Addr),
+    V6(Ipv6Addr, Ipv6Addr),
+}
+
+impl IpPair {
+    fn ethertype(&self) -> u16 {
+        match self {
+            IpPair::V4(..) => ETHERTYPE_IPV4,
+            IpPair::V6(..) => ETHERTYPE_IPV6,
+        }
     }
 }
 
@@ -378,19 +389,18 @@ fn sll_header(direction: Direction, ethertype: u16) -> Vec<u8> {
     h
 }
 
-fn build_layer3(src: IpAddr, dst: IpAddr, payload: &[u8], payload_len: u16) -> Vec<u8> {
-    let ip = build_ip(src, dst, IP_PROTO_TESTING, payload_len);
+fn build_layer3(ips: IpPair, payload: &[u8], payload_len: u16) -> Vec<u8> {
+    let ip = build_ip(ips, IP_PROTO_TESTING, payload_len);
     let mut out = Vec::with_capacity(ip.len() + payload.len());
     out.extend_from_slice(&ip);
     out.extend_from_slice(payload);
     out
 }
 
-fn build_ip(src: IpAddr, dst: IpAddr, protocol: u8, payload_len: u16) -> Vec<u8> {
-    match (src, dst) {
-        (IpAddr::V4(s), IpAddr::V4(d)) => build_ipv4(s, d, protocol, payload_len),
-        (IpAddr::V6(s), IpAddr::V6(d)) => build_ipv6(s, d, protocol, payload_len),
-        _ => unreachable!("address families validated upstream"),
+fn build_ip(ips: IpPair, protocol: u8, payload_len: u16) -> Vec<u8> {
+    match ips {
+        IpPair::V4(s, d) => build_ipv4(s, d, protocol, payload_len),
+        IpPair::V6(s, d) => build_ipv6(s, d, protocol, payload_len),
     }
 }
 
@@ -423,14 +433,20 @@ fn build_ipv6(src: Ipv6Addr, dst: Ipv6Addr, next_header: u8, payload_len: u16) -
     h
 }
 
-fn build_udp(src: SocketAddr, dst: SocketAddr, payload: &[u8], segment_len: u16) -> Vec<u8> {
+fn build_udp(
+    ips: IpPair,
+    src_port: u16,
+    dst_port: u16,
+    payload: &[u8],
+    segment_len: u16,
+) -> Vec<u8> {
     let mut h = vec![0u8; segment_len as usize];
-    h[0..2].copy_from_slice(&src.port().to_be_bytes());
-    h[2..4].copy_from_slice(&dst.port().to_be_bytes());
+    h[0..2].copy_from_slice(&src_port.to_be_bytes());
+    h[2..4].copy_from_slice(&dst_port.to_be_bytes());
     h[4..6].copy_from_slice(&segment_len.to_be_bytes());
     // checksum at h[6..8] left zero for now
     h[8..].copy_from_slice(payload);
-    let csum = transport_checksum(src.ip(), dst.ip(), IP_PROTO_UDP, &h, segment_len);
+    let csum = transport_checksum(ips, IP_PROTO_UDP, &h, segment_len);
     // RFC 768: a transmitted zero checksum is replaced with all-ones.
     let csum = if csum == 0 { 0xffff } else { csum };
     h[6..8].copy_from_slice(&csum.to_be_bytes());
@@ -438,16 +454,17 @@ fn build_udp(src: SocketAddr, dst: SocketAddr, payload: &[u8], segment_len: u16)
 }
 
 fn build_tcp(
-    src: SocketAddr,
-    dst: SocketAddr,
+    ips: IpPair,
+    src_port: u16,
+    dst_port: u16,
     seq: u32,
     ack: u32,
     payload: &[u8],
     segment_len: u16,
 ) -> Vec<u8> {
     let mut h = vec![0u8; segment_len as usize];
-    h[0..2].copy_from_slice(&src.port().to_be_bytes());
-    h[2..4].copy_from_slice(&dst.port().to_be_bytes());
+    h[0..2].copy_from_slice(&src_port.to_be_bytes());
+    h[2..4].copy_from_slice(&dst_port.to_be_bytes());
     h[4..8].copy_from_slice(&seq.to_be_bytes());
     h[8..12].copy_from_slice(&ack.to_be_bytes());
     // data offset (5 << 12) | flags
@@ -457,7 +474,7 @@ fn build_tcp(
                                                         // checksum at h[16..18] left zero for now
                                                         // urgent at h[18..20] left zero
     h[20..].copy_from_slice(payload);
-    let csum = transport_checksum(src.ip(), dst.ip(), IP_PROTO_TCP, &h, segment_len);
+    let csum = transport_checksum(ips, IP_PROTO_TCP, &h, segment_len);
     h[16..18].copy_from_slice(&csum.to_be_bytes());
     h
 }
@@ -478,29 +495,22 @@ fn checksum_ones_complement(data: &[u8]) -> u16 {
     !(sum as u16)
 }
 
-fn transport_checksum(
-    src: IpAddr,
-    dst: IpAddr,
-    protocol: u8,
-    segment: &[u8],
-    segment_len: u16,
-) -> u16 {
+fn transport_checksum(ips: IpPair, protocol: u8, segment: &[u8], segment_len: u16) -> u16 {
     let mut buf = Vec::with_capacity(40 + segment.len());
-    match (src, dst) {
-        (IpAddr::V4(s), IpAddr::V4(d)) => {
+    match ips {
+        IpPair::V4(s, d) => {
             buf.extend_from_slice(&s.octets());
             buf.extend_from_slice(&d.octets());
             buf.push(0);
             buf.push(protocol);
             buf.extend_from_slice(&segment_len.to_be_bytes());
         }
-        (IpAddr::V6(s), IpAddr::V6(d)) => {
+        IpPair::V6(s, d) => {
             buf.extend_from_slice(&s.octets());
             buf.extend_from_slice(&d.octets());
             buf.extend_from_slice(&(segment_len as u32).to_be_bytes());
             buf.extend_from_slice(&[0, 0, 0, protocol]);
         }
-        _ => unreachable!("address families validated upstream"),
     }
     buf.extend_from_slice(segment);
     checksum_ones_complement(&buf)
@@ -761,8 +771,7 @@ mod tests {
         let tcp = &pkt[36..];
         // Recompute and confirm equal to what's in the field.
         let recomputed = transport_checksum(
-            IpAddr::V4(Ipv4Addr::from(src)),
-            IpAddr::V4(Ipv4Addr::from(dst)),
+            IpPair::V4(Ipv4Addr::from(src), Ipv4Addr::from(dst)),
             IP_PROTO_TCP,
             &{
                 let mut s = tcp.to_vec();
@@ -951,7 +960,7 @@ mod tests {
             &[("Call-ID", "ovr-test")],
             b"",
         );
-        let local = SocketAddr::from_str("10.20.30.40:5070").unwrap();
+        let local: SocketAddr = "10.20.30.40:5070".parse().unwrap();
         w.write_parsed_with_local(&msg, Some(local)).unwrap();
         let bytes = w.into_inner();
         // global 24 + record 16 + SLL 16 = 56, IPv4 src at +12
@@ -975,7 +984,7 @@ mod tests {
             &[("Call-ID", "fam-test")],
             b"",
         );
-        let local_v4 = SocketAddr::from_str("10.0.0.1:5060").unwrap();
+        let local_v4: SocketAddr = "10.0.0.1:5060".parse().unwrap();
         let err = w.write_parsed_with_local(&msg, Some(local_v4)).unwrap_err();
         assert!(matches!(err, PcapError::AddressFamilyMismatch));
     }
