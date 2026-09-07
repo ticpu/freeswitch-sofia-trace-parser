@@ -390,17 +390,21 @@ fn find_content_length(data: &[u8]) -> Option<usize> {
     None
 }
 
+/// RFC 3261 HCOLON allows SP/HTAB between the header name and the colon, and
+/// `sip_header` accepts it, so Level 2 framing must see the same header.
 fn extract_header_value<'a>(line: &'a [u8], name: &[u8]) -> Option<&'a [u8]> {
-    if line.len() <= name.len() + 1 {
-        return None;
-    }
+    let rest = line.get(name.len()..)?;
     if !line[..name.len()].eq_ignore_ascii_case(name) {
         return None;
     }
-    if line[name.len()] != b':' {
-        return None;
+    let pad = rest
+        .iter()
+        .position(|&c| c != b' ' && c != b'\t')
+        .unwrap_or(rest.len());
+    match rest.get(pad..)?.split_first() {
+        Some((b':', value)) => Some(trim_bytes(value)),
+        _ => None,
     }
-    Some(trim_bytes(&line[name.len() + 1..]))
 }
 
 fn extract_compact_header_value(line: &[u8], compact: u8) -> Option<&[u8]> {
