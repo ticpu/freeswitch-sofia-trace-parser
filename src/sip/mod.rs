@@ -5,7 +5,7 @@ use sip_header::extract_all_headers;
 use crate::finders::CRLF;
 use crate::frame::ParseError;
 use crate::message::MessageIterator;
-use crate::sip::content_type::{extract_boundary, normalize_media_type};
+use crate::sip::content_type::{extract_boundary, normalize_media_type, value_or_compact};
 use crate::sip::json::unescape_json_body;
 use crate::sip::multipart::{is_multipart_type, split_multipart};
 use crate::sip::startline::{bytes_to_str, parse_first_line, parse_first_line_ref, StartLineRef};
@@ -39,9 +39,7 @@ pub(crate) trait HasHeaders {
     }
 
     fn content_type(&self) -> Option<&str> {
-        self.headers()
-            .value("Content-Type")
-            .or_else(|| self.headers().value("c"))
+        value_or_compact(self.headers(), "Content-Type")
     }
 
     fn media_type(&self) -> Option<Cow<'_, str>> {

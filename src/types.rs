@@ -2,6 +2,7 @@ use std::borrow::Cow;
 use std::fmt;
 use std::net::SocketAddr;
 
+use crate::sip::content_type::value_or_compact;
 use crate::sip::HasHeaders;
 
 /// mod_sofia brackets IPv4 like IPv6 (`[198.51.100.7]:5060`); anything that
@@ -744,8 +745,7 @@ impl ParsedSipMessage {
     /// Returns the Call-ID header value. Checks both `Call-ID` and
     /// the compact form `i`.
     pub fn call_id(&self) -> Option<&str> {
-        self.header_value("Call-ID")
-            .or_else(|| self.header_value("i"))
+        value_or_compact(&self.headers, "Call-ID")
     }
 
     /// Returns the Content-Type header value. Checks both `Content-Type` and
@@ -757,9 +757,7 @@ impl ParsedSipMessage {
     /// Returns the Content-Length header value as `usize`. Checks both
     /// `Content-Length` and the compact form `l`.
     pub fn content_length(&self) -> Option<usize> {
-        self.header_value("Content-Length")
-            .or_else(|| self.header_value("l"))
-            .and_then(|v| v.trim().parse().ok())
+        value_or_compact(&self.headers, "Content-Length").and_then(|v| v.trim().parse().ok())
     }
 
     /// Returns the CSeq header value (e.g., `"1 INVITE"`).
