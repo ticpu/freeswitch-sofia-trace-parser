@@ -16,32 +16,28 @@ enforces that, so a red semver run on a patch bump means the bump was wrong.
 
 ## Pre-release checks
 
-Run in sequence — stop and report on any failure:
+Run `cargo fmt && cargo clippy --fix --allow-dirty --features cli --all-targets --message-format=short`
+first to land any formatting/lint fixes, then `scripts/pre-release.sh` —
+stop and report on any failure. It runs, in order: `cargo fmt -- --check`,
+clippy with `-D warnings`, lib-only and cli+all-targets `cargo check`,
+`cargo test --release --lib`, the CLI binary's own tests, `cargo
+semver-checks --baseline-rev <last-tag>`, and `cargo publish --dry-run`.
+If `samples/` is present it also runs the three
+`--test level{1,2,3}_samples` integration suites and
+`cargo test --release --manifest-path torture/Cargo.toml`; otherwise it
+prints one line noting they were skipped, which is not a release blocker.
 
-```sh
-cargo fmt
-cargo clippy --fix --allow-dirty --features cli --all-targets --message-format=short
-cargo check --no-default-features --message-format=short
-cargo check --features cli --all-targets --message-format=short
-cargo test --release --lib
-cargo test --release --features cli --bin freeswitch-sofia-trace-parser
-cargo semver-checks --baseline-rev <last-tag> --only-explicit-features
-cargo publish --dry-run
-```
+The hook runs semver-checks with cargo's default feature heuristic, and that
+is the gate — there is no `--only-explicit-features` here, since that flag
+sees an empty explicit-feature set and hides the `pcap`/`cli` API entirely.
 
-`--only-explicit-features` keeps semver-checks to the lib-only surface.
-
-`eido` is a git dependency and lives in `[dev-dependencies]` so that cargo
-strips it from the published manifest; a git dependency in `[dependencies]`
-has no crates.io version and blocks publishing outright. Never move it back.
+`eido` lives in the standalone `torture/` crate (see
+`docs/design-rationale.md`, "Torture Corpus Outside the Package"), not in
+this package's manifest, so it plays no part in publishing.
 
 The `pre-commit` hook re-runs fmt, clippy, rustdoc coverage, tests and
-semver-checks on the release commit, so it is the gate — the list above only
-front-loads the failures.
-
-Integration tests (`--test level{1,2,3}_samples`) need `samples/` and skip when it
-is absent. Run them if the samples are present on this machine; their absence is
-not a release blocker.
+semver-checks on the release commit, so it is the gate — `scripts/pre-release.sh`
+only front-loads the failures.
 
 ## Steps
 
