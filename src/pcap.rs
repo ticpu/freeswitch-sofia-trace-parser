@@ -771,6 +771,33 @@ mod tests {
     }
 
     #[test]
+    fn oversize_payload_is_refused() {
+        let (mut w, _) = writer_transport();
+        let payload = vec![b'x'; 70 * 1024];
+        let f = frame(Direction::Recv, Transport::Udp, "10.0.0.1:5060", &payload);
+        let err = w.write_frame(&f).unwrap_err();
+        match err {
+            PcapError::PayloadTooLarge { len, max } => {
+                assert_eq!(len, payload.len());
+                assert!(max < len);
+            }
+            other => panic!("expected PayloadTooLarge, got {other}"),
+        }
+    }
+
+    #[test]
+    fn large_payload_within_snaplen_writes() {
+        let (mut w, _) = writer_transport();
+        let payload = vec![b'x'; 60 * 1024];
+        let f = frame(Direction::Recv, Transport::Udp, "10.0.0.1:5060", &payload);
+        w.write_frame(&f).unwrap();
+        let bytes = w.into_inner();
+        let captured = u32::from_le_bytes(bytes[32..36].try_into().unwrap()) as usize;
+        assert_eq!(captured, 16 + 20 + 8 + payload.len());
+        assert!(captured <= PCAP_SNAPLEN as usize);
+    }
+
+    #[test]
     fn bracketed_ipv4_accepted() {
         let addr = parse_remote_address("[184.150.75.232]:51916").unwrap();
         assert!(addr.is_ipv4());
