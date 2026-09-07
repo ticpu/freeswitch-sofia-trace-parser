@@ -38,7 +38,8 @@ use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::str::FromStr;
 
 use crate::types::{
-    days_from_civil, Direction, Frame, ParsedSipMessage, SipMessage, Timestamp, Transport,
+    days_from_civil, Direction, Frame, FrameMeta, ParsedSipMessage, SipMessage, Timestamp,
+    Transport,
 };
 
 const PCAP_MAGIC_USEC: u32 = 0xa1b2c3d4;
@@ -199,26 +200,12 @@ impl<W: Write> PcapWriter<W> {
 
     /// Emit one packet for a Level-1 frame.
     pub fn write_frame(&mut self, frame: &Frame) -> Result<(), PcapError> {
-        self.emit(
-            frame.direction,
-            frame.transport,
-            &frame.address,
-            frame.timestamp,
-            &frame.content,
-            None,
-        )
+        self.emit(frame.meta(), &frame.content, None)
     }
 
     /// Emit one packet for a Level-2 reassembled message.
     pub fn write_message(&mut self, msg: &SipMessage) -> Result<(), PcapError> {
-        self.emit(
-            msg.direction,
-            msg.transport,
-            &msg.address,
-            msg.timestamp,
-            &msg.content,
-            None,
-        )
+        self.emit(msg.meta(), &msg.content, None)
     }
 
     /// Emit one packet for a Level-3 parsed message. The wire-format payload
@@ -238,14 +225,7 @@ impl<W: Write> PcapWriter<W> {
         msg: &ParsedSipMessage,
         local_override: Option<SocketAddr>,
     ) -> Result<(), PcapError> {
-        self.emit(
-            msg.direction,
-            msg.transport,
-            &msg.address,
-            msg.timestamp,
-            &msg.to_bytes(),
-            local_override,
-        )
+        self.emit(msg.meta(), &msg.to_bytes(), local_override)
     }
 
     /// Flush the underlying writer.
@@ -260,14 +240,13 @@ impl<W: Write> PcapWriter<W> {
 
     fn emit(
         &mut self,
-        direction: Direction,
-        transport: Transport,
-        address: &str,
-        timestamp: Timestamp,
+        meta: FrameMeta<'_>,
         payload: &[u8],
         local_override: Option<SocketAddr>,
     ) -> Result<(), PcapError> {
-        let remote = parse_remote_address(address)?;
+        let remote = meta
+            .socket_addr()
+            .ok_or_else(|| PcapError::InvalidAddress(meta.address.to_string()))?;
         let local = match local_override {
             Some(addr) => addr,
             None => match remote {
@@ -278,13 +257,13 @@ impl<W: Write> PcapWriter<W> {
         if remote.is_ipv4() != local.is_ipv4() {
             return Err(PcapError::AddressFamilyMismatch);
         }
-        let (src, dst) = match direction {
+        let (src, dst) = match meta.direction {
             Direction::Recv => (remote, local),
             Direction::Sent => (local, remote),
         };
-        let (ts_sec, ts_usec) = timestamp_to_unix(timestamp, self.config.date_base);
+        let (ts_sec, ts_usec) = timestamp_to_unix(meta.timestamp, self.config.date_base);
 
-        let max = payload_limit(self.config.layer, remote.ip(), transport);
+        let max = payload_limit(self.config.layer, remote.ip(), meta.transport);
         let payload_len = match u16::try_from(payload.len()) {
             Ok(len) if payload.len() <= max => len,
             _ => {
@@ -297,9 +276,7 @@ impl<W: Write> PcapWriter<W> {
 
         let packet = match self.config.layer {
             PcapLayer::Network => build_layer3(src.ip(), dst.ip(), payload, payload_len),
-            PcapLayer::Transport => {
-                self.build_layer4(direction, transport, src, dst, payload, payload_len)
-            }
+            PcapLayer::Transport => self.build_layer4(meta, src, dst, payload, payload_len),
         };
 
         let mut rec = [0u8; 16];
@@ -315,16 +292,16 @@ impl<W: Write> PcapWriter<W> {
 
     fn build_layer4(
         &mut self,
-        direction: Direction,
-        transport: Transport,
+        meta: FrameMeta<'_>,
         src: SocketAddr,
         dst: SocketAddr,
         payload: &[u8],
         payload_len: u16,
     ) -> Vec<u8> {
+        let direction = meta.direction;
         let mut out = sll_header(direction, ip_family_ethertype(src.ip()));
 
-        let (transport_proto, segment_len, transport_segment) = match transport {
+        let (transport_proto, segment_len, transport_segment) = match meta.transport {
             Transport::Udp => {
                 let segment_len = payload_len.saturating_add(UDP_HEADER_LEN);
                 (
@@ -334,7 +311,7 @@ impl<W: Write> PcapWriter<W> {
                 )
             }
             Transport::Tcp | Transport::Tls | Transport::Wss => {
-                let key = (transport, format_remote_key(src, dst, direction));
+                let key = (meta.transport, format_remote_key(src, dst, direction));
                 let conn = self.connections.entry(key).or_default();
                 let (seq, ack) = match direction {
                     Direction::Sent => (conn.sent_seq, conn.recv_seq),
@@ -379,29 +356,6 @@ fn payload_limit(layer: PcapLayer, ip: IpAddr, transport: Transport) -> usize {
     };
     let snaplen = PCAP_SNAPLEN.saturating_sub((link_header + ip_header + transport_header) as u32);
     (ip_field.saturating_sub(transport_header) as usize).min(snaplen as usize)
-}
-
-/// Accepts `1.2.3.4:5060`, `[::1]:5060`, and FreeSWITCH's bracketed-IPv4
-/// `[1.2.3.4]:5060` (mod_sofia formats TCP/TLS endpoints as URI authority).
-fn parse_remote_address(address: &str) -> Result<SocketAddr, PcapError> {
-    if let Ok(addr) = SocketAddr::from_str(address) {
-        return Ok(addr);
-    }
-    // Try unbracketing an IPv4 wrapped as `[a.b.c.d]:port`.
-    if let Some(rest) = address.strip_prefix('[') {
-        if let Some(close) = rest.find(']') {
-            let host = &rest[..close];
-            let port_part = &rest[close + 1..];
-            if let Ok(v4) = Ipv4Addr::from_str(host) {
-                if let Some(port_str) = port_part.strip_prefix(':') {
-                    if let Ok(port) = port_str.parse::<u16>() {
-                        return Ok(SocketAddr::new(IpAddr::V4(v4), port));
-                    }
-                }
-            }
-        }
-    }
-    Err(PcapError::InvalidAddress(address.to_string()))
 }
 
 fn ip_family_ethertype(ip: IpAddr) -> u16 {
@@ -877,7 +831,13 @@ mod tests {
 
     #[test]
     fn bracketed_ipv4_accepted() {
-        let addr = parse_remote_address("[184.150.75.232]:51916").unwrap();
+        let f = frame(
+            Direction::Recv,
+            Transport::Udp,
+            "[184.150.75.232]:51916",
+            b"x",
+        );
+        let addr = f.meta().socket_addr().unwrap();
         assert!(addr.is_ipv4());
         assert_eq!(addr.port(), 51916);
     }
