@@ -1074,11 +1074,18 @@ mod tests {
         let mut data = make_frame(Direction::Recv, Transport::Tls, addr, b"\n");
         data.extend_from_slice(&make_frame(Direction::Recv, Transport::Tls, addr, sip));
         data.extend_from_slice(&make_frame(Direction::Recv, Transport::Tls, addr, b"\n"));
-        let msgs: Vec<SipMessage> = MessageIterator::new(&data[..])
-            .collect::<Result<Vec<_>, _>>()
-            .unwrap();
+        let mut iter = MessageIterator::new(&data[..]);
+        let msgs: Vec<SipMessage> = iter.by_ref().collect::<Result<Vec<_>, _>>().unwrap();
         assert_eq!(msgs.len(), 1, "only the SIP message should be emitted");
         assert_eq!(msgs[0].content, sip);
+        assert_eq!(
+            msgs[0].frame_count, 1,
+            "the drained keep-alive frame must not count toward the message"
+        );
+        assert!(
+            iter.buffers.is_empty(),
+            "a buffer drained to nothing must not be retained"
+        );
     }
 
     #[test]
