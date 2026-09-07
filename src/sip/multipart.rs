@@ -103,7 +103,12 @@ impl ParsedSipMessage {
         if let Some(parts) = self.body_parts() {
             return parts;
         }
+        vec![self.synthetic_part()]
+    }
 
+    /// The whole body as one part, headed by the message's own `Content-*`
+    /// headers under their canonical names.
+    fn synthetic_part(&self) -> MimePart {
         let mut headers: Vec<(String, String)> = Vec::new();
         if let Some(ct) = self.content_type() {
             headers.push(("Content-Type".to_string(), ct.to_string()));
@@ -120,10 +125,10 @@ impl ParsedSipMessage {
             }
             headers.push((canonical.to_string(), value.clone()));
         }
-        vec![MimePart {
+        MimePart {
             headers: Headers(headers),
             body: self.body.clone(),
-        }]
+        }
     }
 }
 
@@ -155,42 +160,49 @@ fn boundary_tail(rest: &[u8]) -> Option<BoundaryTail> {
     }
 }
 
-/// Next RFC 2046 delimiter line at or after `from`: `--boundary` at body
-/// offset 0 (no preamble) or immediately after a CRLF. `part_end` is where the
-/// preceding part's content stops — the CRLF belongs to the delimiter line.
-fn next_delimiter(
-    body: &[u8],
-    from: usize,
-    dash_boundary: &[u8],
-    anchored: &memmem::Finder<'_>,
-) -> Option<(usize, usize, BoundaryTail)> {
-    if from == 0 && body.starts_with(dash_boundary) {
-        if let Some(tail) = boundary_tail(&body[dash_boundary.len()..]) {
-            return Some((0, dash_boundary.len(), tail));
-        }
+/// The `\r\n--boundary` pattern and its searcher, built once per body.
+struct BoundaryMatcher {
+    pattern: Vec<u8>,
+    finder: memmem::Finder<'static>,
+}
+
+impl BoundaryMatcher {
+    fn new(boundary: &str) -> Self {
+        let mut pattern = Vec::with_capacity(boundary.len() + 4);
+        pattern.extend_from_slice(b"\r\n--");
+        pattern.extend_from_slice(boundary.as_bytes());
+        let finder = memmem::Finder::new(&pattern).into_owned();
+        BoundaryMatcher { pattern, finder }
     }
-    let mut search = from;
-    while let Some(rel) = anchored.find(&body[search..]) {
-        let crlf = search + rel;
-        let token_end = crlf + 2 + dash_boundary.len();
-        if let Some(tail) = boundary_tail(&body[token_end..]) {
-            return Some((crlf, token_end, tail));
+
+    /// Next RFC 2046 delimiter line at or after `from`: `--boundary` at body
+    /// offset 0 (no preamble) or immediately after a CRLF. `part_end` is where
+    /// the preceding part's content stops — the CRLF belongs to the delimiter.
+    fn next_delimiter(&self, body: &[u8], from: usize) -> Option<(usize, usize, BoundaryTail)> {
+        let dash_boundary = &self.pattern[2..];
+        if from == 0 && body.starts_with(dash_boundary) {
+            if let Some(tail) = boundary_tail(&body[dash_boundary.len()..]) {
+                return Some((0, dash_boundary.len(), tail));
+            }
         }
-        search = crlf + 1;
+        let mut search = from;
+        while let Some(rel) = self.finder.find(&body[search..]) {
+            let crlf = search + rel;
+            let token_end = crlf + 2 + dash_boundary.len();
+            if let Some(tail) = boundary_tail(&body[token_end..]) {
+                return Some((crlf, token_end, tail));
+            }
+            search = crlf + 1;
+        }
+        None
     }
-    None
 }
 
 fn parse_multipart_body(body: &[u8], boundary: &str) -> Vec<MimePart> {
-    let mut pattern = Vec::with_capacity(boundary.len() + 4);
-    pattern.extend_from_slice(b"\r\n--");
-    pattern.extend_from_slice(boundary.as_bytes());
-    let anchored = memmem::Finder::new(&pattern);
-    let dash_boundary = &pattern[2..];
-
+    let matcher = BoundaryMatcher::new(boundary);
     let mut parts = Vec::new();
 
-    let Some((_, token_end, tail)) = next_delimiter(body, 0, dash_boundary, &anchored) else {
+    let Some((_, token_end, tail)) = matcher.next_delimiter(body, 0) else {
         return parts;
     };
     let mut cursor = match tail {
@@ -201,7 +213,7 @@ fn parse_multipart_body(body: &[u8], boundary: &str) -> Vec<MimePart> {
     };
 
     loop {
-        match next_delimiter(body, cursor, dash_boundary, &anchored) {
+        match matcher.next_delimiter(body, cursor) {
             Some((part_end, token_end, BoundaryTail::Open(skip))) => {
                 parts.push(parse_mime_part(&body[cursor..part_end]));
                 cursor = token_end + skip;
