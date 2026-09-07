@@ -79,57 +79,26 @@ fn digit(b: u8) -> Option<u8> {
     }
 }
 
-fn parse_u8(bytes: &[u8]) -> Option<u8> {
-    if bytes.is_empty() || bytes.len() > 3 {
+/// Parse up to `MAX_DIGITS` ASCII digits; a value the target type cannot hold
+/// is `None`, as is any non-digit byte.
+fn parse_digits<const MAX_DIGITS: usize, T: TryFrom<u64>>(bytes: &[u8]) -> Option<T> {
+    if bytes.is_empty() || bytes.len() > MAX_DIGITS {
         return None;
     }
-    let mut val: u8 = 0;
+    let mut val: u64 = 0;
     for &b in bytes {
-        val = val.checked_mul(10)?.checked_add(digit(b)?)?;
+        val = val.checked_mul(10)?.checked_add(u64::from(digit(b)?))?;
     }
-    Some(val)
-}
-
-fn parse_u16(bytes: &[u8]) -> Option<u16> {
-    if bytes.is_empty() || bytes.len() > 5 {
-        return None;
-    }
-    let mut val: u16 = 0;
-    for &b in bytes {
-        val = val.checked_mul(10)?.checked_add(u16::from(digit(b)?))?;
-    }
-    Some(val)
-}
-
-fn parse_u32(bytes: &[u8]) -> Option<u32> {
-    if bytes.is_empty() || bytes.len() > 10 {
-        return None;
-    }
-    let mut val: u32 = 0;
-    for &b in bytes {
-        val = val.checked_mul(10)?.checked_add(u32::from(digit(b)?))?;
-    }
-    Some(val)
-}
-
-fn parse_usize(bytes: &[u8]) -> Option<usize> {
-    if bytes.is_empty() || bytes.len() > 10 {
-        return None;
-    }
-    let mut val: usize = 0;
-    for &b in bytes {
-        val = val.checked_mul(10)?.checked_add(usize::from(digit(b)?))?;
-    }
-    Some(val)
+    T::try_from(val).ok()
 }
 
 /// Parse timestamp from bytes: either `HH:MM:SS.usec` or `YYYY-MM-DD HH:MM:SS.usec`
 fn parse_timestamp(bytes: &[u8]) -> Option<Timestamp> {
     // Try full datetime first: YYYY-MM-DD HH:MM:SS.usec (min 26 bytes)
     if bytes.len() >= 26 && bytes[4] == b'-' && bytes[7] == b'-' && bytes[10] == b' ' {
-        let year = parse_u16(&bytes[0..4])?;
-        let month = parse_u8(&bytes[5..7])?;
-        let day = parse_u8(&bytes[8..10])?;
+        let year = parse_digits::<5, u16>(&bytes[0..4])?;
+        let month = parse_digits::<3, u8>(&bytes[5..7])?;
+        let day = parse_digits::<3, u8>(&bytes[8..10])?;
         let ts = parse_time_part(&bytes[11..])?;
         return Some(Timestamp::DateTime {
             year,
@@ -159,10 +128,10 @@ fn parse_time_part(bytes: &[u8]) -> Option<(u8, u8, u8, u32)> {
     if bytes[2] != b':' || bytes[5] != b':' || bytes[8] != b'.' {
         return None;
     }
-    let hour = parse_u8(&bytes[0..2])?;
-    let min = parse_u8(&bytes[3..5])?;
-    let sec = parse_u8(&bytes[6..8])?;
-    let usec = parse_u32(&bytes[9..15])?;
+    let hour = parse_digits::<3, u8>(&bytes[0..2])?;
+    let min = parse_digits::<3, u8>(&bytes[3..5])?;
+    let sec = parse_digits::<3, u8>(&bytes[6..8])?;
+    let usec = parse_digits::<10, u32>(&bytes[9..15])?;
     Some((hour, min, sec, usec))
 }
 
@@ -213,7 +182,7 @@ pub fn parse_frame_header(data: &[u8]) -> Result<FrameHeader, ParseError> {
     // Byte count: digits until ' '
     let space = memchr::memchr(b' ', &line[pos..])
         .ok_or_else(|| ParseError::InvalidHeader("no space after byte count".into()))?;
-    let byte_count = parse_usize(&line[pos..pos + space])
+    let byte_count = parse_digits::<10, usize>(&line[pos..pos + space])
         .ok_or_else(|| ParseError::InvalidHeader("invalid byte count".into()))?;
     pos += space + 1;
 
