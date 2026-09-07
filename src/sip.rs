@@ -1659,6 +1659,18 @@ mod tests {
     }
 
     #[test]
+    fn extract_boundary_only_from_its_own_parameter() {
+        assert_eq!(
+            extract_boundary("multipart/mixed; x-boundary=decoy; boundary=real"),
+            Some("real")
+        );
+        assert_eq!(
+            extract_boundary("multipart/mixed; name=\"boundary=decoy\"; boundary=real"),
+            Some("real")
+        );
+    }
+
+    #[test]
     fn multipart_part_no_headers() {
         let raw_body = b"just raw content";
 
