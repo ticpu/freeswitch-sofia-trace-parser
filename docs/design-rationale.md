@@ -113,29 +113,30 @@ sent 200 bytes to tcp/10.0.0.2:5060 ...     (connection B, response)
 recv 800 bytes from tcp/10.0.0.1:5060 ...   (connection A, fragment 2)
 ```
 
-The fix was per-connection buffering with
-`HashMap<(Direction, Address), ConnectionBuffer>`. Each connection maintains
-its own reassembly state. Frames are routed to the correct buffer regardless
-of interleaving. Messages are emitted when headers (`\r\n\r\n`) and
-Content-Length body bytes are fully available.
+The fix was per-connection buffering keyed by direction and remote address.
+Each connection maintains its own reassembly state. Frames are routed to the
+correct buffer regardless of interleaving. Messages are emitted when headers
+(`\r\n\r\n`) and Content-Length body bytes are fully available.
 
-Buffers are eagerly removed after complete message extraction. This is critical
-for constant-memory streaming: without eager removal, TLS profiles with
-ephemeral source ports accumulate thousands of dead buffers over multi-day runs.
+A buffer is removed the moment it holds no pending bytes, and a message's
+frame count covers only the frames that carried it. This is critical for
+constant-memory streaming: without eager removal, TLS profiles with
+ephemeral source ports accumulate thousands of dead buffers over multi-day
+runs.
 
 ## Stale Buffer Eviction
 
 TLS connections use ephemeral source ports. Over a multi-day dump stream,
-the buffer HashMap grows without bound as new ports appear and old ones
-go silent. The parser tracks a synthetic day counter (incrementing when
-timestamps wrap past midnight) and evicts buffers inactive for more than
-2 hours (RFC 793 TCP keepalive timeout). Empty buffers are evicted silently;
-non-empty buffers emit a warning and flush as incomplete messages.
+the buffer map grows without bound as new ports appear and old ones go
+silent. The parser evicts buffers inactive for longer than the standard TCP
+keepalive interval: any connection silent for that long in a VoIP environment
+is dead. Non-empty buffers flush as incomplete messages.
 
-The 2-hour timeout was chosen because it's the standard TCP keepalive
-interval. Any connection silent for that long in a VoIP environment
-is dead. The synthetic day counter handles `TimeOnly` timestamps
-(HH:MM:SS.usec) that don't include dates.
+Elapsed time comes from the timestamp's own date when the header carries one;
+time-only timestamps get a synthetic day counter that increments when the
+clock wraps past midnight. The two share no epoch, so a stream that switches
+format resets the clock rather than comparing across the switch. The CLI's
+dialog grouping bounds its memory with the same clock and rule.
 
 ## Why SkipTracking Has Three Modes
 
@@ -168,10 +169,12 @@ The six reasons evolved from production observations:
 - **PartialFirstFrame** — The first bytes of a dump file are almost always
   a truncated frame from logrotate. The file was rotated mid-write, so the
   new file starts with the tail of whatever frame was being written. This is
-  expected and benign. Capped at 65,535 bytes (IP max datagram + boundary).
+  expected and benign. Capped at the largest IP datagram plus its boundary.
 
-- **OversizedFrame** — A skip larger than 65,537 bytes at file start.
+- **OversizedFrame** — A skip larger than that cap, wherever it occurs.
   Indicates the input isn't a dump file (compressed data, binary garbage).
+  The same cap bounds how far a declared byte count may run past the
+  buffered bytes before boundary scanning takes over.
 
 - **ReplayedFrame** — Logrotate's `copytruncate` creates a race: the
   frame being written when the file is rotated appears partially in both
@@ -273,7 +276,10 @@ and tracing-subscriber into library consumers.
 Rules that emerged from production use:
 
 - **No `unwrap()`/`expect()`/`panic!()` in library code.** Return
-  `Result` or `Option`. The pre-commit hook enforces this.
+  `Result` or `Option`. Clippy denies them outside tests.
+
+- **Root re-exports are an explicit list.** A glob would make every type
+  added to a module public API on the day it is added, with no review.
 
 - **Binary-only deps must be feature-gated.** Library consumers with
   `default-features = false` must not pull CLI dependencies.
@@ -389,6 +395,10 @@ both can be wrong, and pure integer civil-day math (Howard Hinnant's
 `days_from_civil`) avoids pulling `chrono` into the public API where a
 major-version bump would become a semver break.
 
+A payload larger than the IP family's length field can carry is refused as
+an error; the writer never truncates a length field or exceeds the snaplen
+it advertised, since a silently corrupt packet reads as the dump's truth.
+
 The module is behind a `pcap` feature flag. Library consumers that only
 need parsing pay nothing for it; the CLI enables it transitively.
 
@@ -418,7 +428,16 @@ Recovery from genuine invalid headers scans forward to the next
 caller sees the error. The library never silently swallows parse
 failures.
 
-## Why Per-File Throughput Matters
+## Torture Corpus Outside the Package
+
+The URI and PIDF torture runs live in a standalone crate beside the library:
+not in its test directory, not as a workspace member. They need the EIDO
+crate, a git dependency without a crates.io release, and Cargo has no
+optional dev-dependencies and resolves a workspace lock as a whole, so either
+placement would make every library test build fetch it, on hosts without
+access to the git host.
+
+## Per-File Throughput
 
 The downstream `freeswitch-sip-trace-analyzer` processes 700MB–2GB of
 xz-compressed dump data per call investigation query. Even after
@@ -442,6 +461,16 @@ header crate applies, which is stricter than the message's own. Both
 halves bind: a consumer filtering on one drops only what it has
 classified, and anything classified would have parsed, so rejecting
 before Level 3 hides no parse error.
+
+Level 3 splits its body at that same header-block boundary, so no byte
+falls between the halves. Level 2 keeps framing on CRLF pairs and
+Content-Length; on a malformed blank line the levels disagree by design,
+each still accounting for every byte.
+
+Level 2 finds a message start with the Level 3 start-line grammar, not a
+method table, so any request Level 3 would parse is resynchronised on; a
+start line cut short by a frame boundary waits for more bytes rather than
+being scanned past.
 
 ### GrepFilter Zero-Copy Path
 
