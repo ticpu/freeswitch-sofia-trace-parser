@@ -885,6 +885,50 @@ mod tests {
     }
 
     #[test]
+    fn extract_resyncs_on_extension_method() {
+        let prefix = b"</conference-info>\r\n";
+        let msg = b"XYZZY sip:a SIP/2.0\r\nContent-Length: 0\r\n\r\n";
+        let mut content = Vec::new();
+        content.extend_from_slice(prefix);
+        content.extend_from_slice(msg);
+        let data = make_frame(Direction::Recv, Transport::Tcp, "[::1]:5060", &content);
+
+        let msgs: Vec<SipMessage> = MessageIterator::new(&data[..])
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert_eq!(msgs.len(), 1);
+        assert_eq!(msgs[0].content, msg);
+    }
+
+    #[test]
+    fn extract_waits_for_half_received_request_line() {
+        let mut content = Vec::new();
+        content.extend_from_slice(b"</conference-info>\r\n");
+        content.extend_from_slice(b"XYZZY sip:a SI");
+
+        let key = (Direction::Recv, "[::1]:5060".to_string());
+        let mut buf = ConnectionBuffer {
+            transport: Transport::Tcp,
+            timestamp: Timestamp::TimeOnly {
+                hour: 0,
+                min: 0,
+                sec: 0,
+                usec: 0,
+            },
+            content,
+            frame_count: 1,
+            last_seen_day: 0,
+            last_seen_time_secs: 0,
+        };
+        let msgs = extract_complete(&mut buf, &key);
+        assert!(msgs.is_empty());
+        assert_eq!(
+            buf.content, b"XYZZY sip:a SI",
+            "an unterminated request line waits instead of being scanned past"
+        );
+    }
+
+    #[test]
     fn extract_waits_for_incomplete_body() {
         // Headers complete but body is missing
         let content = b"INVITE sip:a SIP/2.0\r\nContent-Length: 100\r\n\r\npartial".to_vec();
