@@ -1655,6 +1655,23 @@ mod tests {
     }
 
     #[test]
+    fn nested_part_typed_with_compact_content_type() {
+        let part = MimePart {
+            headers: Headers(vec![(
+                "c".to_string(),
+                "multipart/mixed;boundary=inner".to_string(),
+            )]),
+            body: b"--inner\r\nContent-Type: application/sdp\r\n\r\nv=0\r\n--inner--".to_vec(),
+        };
+        assert_eq!(part.content_type(), Some("multipart/mixed;boundary=inner"));
+        assert!(part.is_multipart());
+        let children = part.body_parts().expect("compact type must still split");
+        assert_eq!(children.len(), 1);
+        assert_eq!(children[0].content_type(), Some("application/sdp"));
+        assert_eq!(children[0].body, b"v=0");
+    }
+
+    #[test]
     fn method_with_backtick_is_a_token() {
         let msg = make_sip_message(b"X-P`ING sip:host SIP/2.0\r\nCSeq: 1 X-P`ING\r\n\r\n");
         assert_eq!(msg.parse().unwrap().method(), Some("X-P`ING"));
