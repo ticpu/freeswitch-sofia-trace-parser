@@ -130,10 +130,16 @@ mod tests {
         assert_eq!(parts[0].media_type().as_deref(), Some("application/sdp"));
     }
 
+    fn boundary_of(content_type: &str) -> Option<String> {
+        make_with_content_type(&format!("Content-Type: {content_type}"))
+            .multipart_boundary()
+            .map(str::to_string)
+    }
+
     #[test]
     fn extract_boundary_unquoted() {
         assert_eq!(
-            extract_boundary("multipart/mixed;boundary=foo-bar"),
+            boundary_of("multipart/mixed;boundary=foo-bar").as_deref(),
             Some("foo-bar")
         );
     }
@@ -141,7 +147,7 @@ mod tests {
     #[test]
     fn extract_boundary_quoted() {
         assert_eq!(
-            extract_boundary("multipart/mixed; boundary=\"foo-bar\""),
+            boundary_of("multipart/mixed; boundary=\"foo-bar\"").as_deref(),
             Some("foo-bar")
         );
     }
@@ -149,7 +155,7 @@ mod tests {
     #[test]
     fn extract_boundary_with_extra_params() {
         assert_eq!(
-            extract_boundary("multipart/mixed; boundary=foo;charset=utf-8"),
+            boundary_of("multipart/mixed; boundary=foo;charset=utf-8").as_deref(),
             Some("foo")
         );
     }
@@ -157,62 +163,44 @@ mod tests {
     #[test]
     fn extract_boundary_case_insensitive() {
         assert_eq!(
-            extract_boundary("multipart/mixed;BOUNDARY=abc"),
+            boundary_of("multipart/mixed;BOUNDARY=abc").as_deref(),
             Some("abc")
         );
     }
 
     #[test]
     fn extract_boundary_missing() {
-        assert_eq!(extract_boundary("multipart/mixed"), None);
+        assert_eq!(boundary_of("multipart/mixed"), None);
     }
 
     #[test]
     fn extract_boundary_only_from_its_own_parameter() {
         assert_eq!(
-            extract_boundary("multipart/mixed; x-boundary=decoy; boundary=real"),
+            boundary_of("multipart/mixed; x-boundary=decoy; boundary=real").as_deref(),
             Some("real")
         );
         assert_eq!(
-            extract_boundary("multipart/mixed; name=\"boundary=decoy\"; boundary=real"),
+            boundary_of("multipart/mixed; name=\"boundary=decoy\"; boundary=real").as_deref(),
             Some("real")
         );
     }
 
     #[test]
-    fn is_json_content_type_application_json() {
-        assert!(is_json_content_type("application/json"));
-    }
-
-    #[test]
-    fn is_json_content_type_plus_json() {
-        assert!(is_json_content_type(
-            "application/emergencyCallData.AbandonedCall+json"
-        ));
-    }
-
-    #[test]
-    fn is_json_content_type_with_params() {
-        assert!(is_json_content_type("application/json; charset=utf-8"));
-    }
-
-    #[test]
-    fn is_json_content_type_case_insensitive() {
-        assert!(is_json_content_type("Application/JSON"));
-    }
-
-    #[test]
-    fn is_json_content_type_not_text_plain() {
-        assert!(!is_json_content_type("text/plain"));
-    }
-
-    #[test]
-    fn is_json_content_type_not_multipart() {
-        assert!(!is_json_content_type("multipart/mixed;boundary=foo"));
-    }
-
-    #[test]
-    fn is_json_content_type_not_sdp() {
-        assert!(!is_json_content_type("application/sdp"));
+    fn is_json_content_type_table() {
+        for ct in [
+            "application/json",
+            "application/emergencyCallData.AbandonedCall+json",
+            "application/json; charset=utf-8",
+            "Application/JSON",
+        ] {
+            assert!(is_json_content_type(ct), "should be JSON: {ct}");
+        }
+        for ct in [
+            "text/plain",
+            "multipart/mixed;boundary=foo",
+            "application/sdp",
+        ] {
+            assert!(!is_json_content_type(ct), "should not be JSON: {ct}");
+        }
     }
 }

@@ -797,9 +797,7 @@ impl ParsedSipMessage {
             out.extend_from_slice(format!("{name}: {value}\r\n").as_bytes());
         }
         out.extend_from_slice(b"\r\n");
-        if !self.body.is_empty() {
-            out.extend_from_slice(&self.body);
-        }
+        out.extend_from_slice(&self.body);
         out
     }
 
@@ -1018,56 +1016,6 @@ mod tests {
             &[0xFF, 0xFE],
         );
         assert!(msg.body_data().contains('\u{FFFD}'));
-    }
-
-    #[test]
-    fn body_text_non_json_passthrough() {
-        let msg = make_parsed(
-            SipMessageType::Request {
-                method: "INVITE".into(),
-                uri: "sip:host".into(),
-            },
-            vec![("Content-Type", "application/sdp")],
-            b"v=0\r\ns=-\r\n",
-        );
-        assert_eq!(msg.body_text().as_ref(), msg.body_data().as_ref());
-    }
-
-    #[test]
-    fn body_text_json_unescapes_newlines() {
-        let msg = make_parsed(
-            SipMessageType::Request {
-                method: "NOTIFY".into(),
-                uri: "sip:host".into(),
-            },
-            vec![("Content-Type", "application/json")],
-            br#"{"invite":"INVITE sip:host SIP/2.0\r\nTo: <sip:host>\r\n"}"#,
-        );
-        let text = msg.body_text();
-        assert!(
-            text.contains("INVITE sip:host SIP/2.0\r\nTo: <sip:host>\r\n"),
-            "JSON \\r\\n should be unescaped to actual CRLF, got: {text:?}"
-        );
-    }
-
-    #[test]
-    fn body_text_plus_json_content_type() {
-        let msg = make_parsed(
-            SipMessageType::Request {
-                method: "NOTIFY".into(),
-                uri: "sip:host".into(),
-            },
-            vec![(
-                "Content-Type",
-                "application/emergencyCallData.AbandonedCall+json",
-            )],
-            br#"{"invite":"line1\nline2"}"#,
-        );
-        let text = msg.body_text();
-        assert!(
-            text.contains("line1\nline2"),
-            "application/*+json should trigger unescaping, got: {text:?}"
-        );
     }
 
     #[test]

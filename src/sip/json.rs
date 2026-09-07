@@ -110,7 +110,7 @@ fn parse_hex4(hex: &str) -> Option<u16> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::sip::test_support::make_sip_message;
+    use crate::sip::test_support::parsed_with_headers;
 
     #[test]
     fn unescape_json_basic_escapes() {
@@ -161,19 +161,50 @@ mod tests {
     }
 
     #[test]
+    fn body_text_non_json_passthrough() {
+        let msg = parsed_with_headers(
+            "bt-sdp",
+            &["Content-Type: application/sdp"],
+            b"v=0\r\ns=-\r\n",
+        );
+        assert_eq!(msg.body_text().as_ref(), msg.body_data().as_ref());
+    }
+
+    #[test]
+    fn body_text_json_unescapes_newlines() {
+        let msg = parsed_with_headers(
+            "bt-json",
+            &["Content-Type: application/json"],
+            br#"{"invite":"INVITE sip:host SIP/2.0\r\nTo: <sip:host>\r\n"}"#,
+        );
+        let text = msg.body_text();
+        assert!(
+            text.contains("INVITE sip:host SIP/2.0\r\nTo: <sip:host>\r\n"),
+            "JSON \\r\\n should be unescaped to actual CRLF, got: {text:?}"
+        );
+    }
+
+    #[test]
+    fn body_text_plus_json_content_type() {
+        let msg = parsed_with_headers(
+            "bt-plus-json",
+            &["Content-Type: application/emergencyCallData.AbandonedCall+json"],
+            br#"{"invite":"line1\nline2"}"#,
+        );
+        let text = msg.body_text();
+        assert!(
+            text.contains("line1\nline2"),
+            "application/*+json should trigger unescaping, got: {text:?}"
+        );
+    }
+
+    #[test]
     fn json_field_extract_string() {
-        let body = br#"{"event":"AbandonedCall","id":"123"}"#;
-        let mut content = Vec::new();
-        content.extend_from_slice(b"NOTIFY sip:host SIP/2.0\r\n");
-        content.extend_from_slice(b"Call-ID: jf-test@host\r\n");
-        content.extend_from_slice(b"Content-Type: application/json\r\n");
-        content.extend_from_slice(format!("Content-Length: {}\r\n", body.len()).as_bytes());
-        content.extend_from_slice(b"\r\n");
-        content.extend_from_slice(body);
-
-        let msg = make_sip_message(&content);
-        let parsed = msg.parse().unwrap();
-
+        let parsed = parsed_with_headers(
+            "jf-test",
+            &["Content-Type: application/json"],
+            br#"{"event":"AbandonedCall","id":"123"}"#,
+        );
         assert_eq!(
             parsed.json_field("event"),
             Some("AbandonedCall".to_string())
@@ -183,70 +214,42 @@ mod tests {
 
     #[test]
     fn json_field_missing_key() {
-        let body = br#"{"event":"AbandonedCall"}"#;
-        let mut content = Vec::new();
-        content.extend_from_slice(b"NOTIFY sip:host SIP/2.0\r\n");
-        content.extend_from_slice(b"Call-ID: jf-miss@host\r\n");
-        content.extend_from_slice(b"Content-Type: application/json\r\n");
-        content.extend_from_slice(format!("Content-Length: {}\r\n", body.len()).as_bytes());
-        content.extend_from_slice(b"\r\n");
-        content.extend_from_slice(body);
-
-        let msg = make_sip_message(&content);
-        let parsed = msg.parse().unwrap();
-
+        let parsed = parsed_with_headers(
+            "jf-miss",
+            &["Content-Type: application/json"],
+            br#"{"event":"AbandonedCall"}"#,
+        );
         assert_eq!(parsed.json_field("nonexistent"), None);
     }
 
     #[test]
     fn json_field_non_string_value() {
-        let body = br#"{"count":42,"active":true}"#;
-        let mut content = Vec::new();
-        content.extend_from_slice(b"NOTIFY sip:host SIP/2.0\r\n");
-        content.extend_from_slice(b"Call-ID: jf-nonstr@host\r\n");
-        content.extend_from_slice(b"Content-Type: application/json\r\n");
-        content.extend_from_slice(format!("Content-Length: {}\r\n", body.len()).as_bytes());
-        content.extend_from_slice(b"\r\n");
-        content.extend_from_slice(body);
-
-        let msg = make_sip_message(&content);
-        let parsed = msg.parse().unwrap();
-
+        let parsed = parsed_with_headers(
+            "jf-nonstr",
+            &["Content-Type: application/json"],
+            br#"{"count":42,"active":true}"#,
+        );
         assert_eq!(parsed.json_field("count"), None);
         assert_eq!(parsed.json_field("active"), None);
     }
 
     #[test]
     fn json_field_non_json_content_type() {
-        let body = br#"{"event":"AbandonedCall"}"#;
-        let mut content = Vec::new();
-        content.extend_from_slice(b"NOTIFY sip:host SIP/2.0\r\n");
-        content.extend_from_slice(b"Call-ID: jf-nonjson@host\r\n");
-        content.extend_from_slice(b"Content-Type: text/plain\r\n");
-        content.extend_from_slice(format!("Content-Length: {}\r\n", body.len()).as_bytes());
-        content.extend_from_slice(b"\r\n");
-        content.extend_from_slice(body);
-
-        let msg = make_sip_message(&content);
-        let parsed = msg.parse().unwrap();
-
+        let parsed = parsed_with_headers(
+            "jf-nonjson",
+            &["Content-Type: text/plain"],
+            br#"{"event":"AbandonedCall"}"#,
+        );
         assert_eq!(parsed.json_field("event"), None);
     }
 
     #[test]
     fn json_field_unescapes_value() {
-        let body = br#"{"invite":"INVITE sip:host\r\nTo: <sip:host>\r\n"}"#;
-        let mut content = Vec::new();
-        content.extend_from_slice(b"NOTIFY sip:host SIP/2.0\r\n");
-        content.extend_from_slice(b"Call-ID: jf-unescape@host\r\n");
-        content.extend_from_slice(b"Content-Type: application/json\r\n");
-        content.extend_from_slice(format!("Content-Length: {}\r\n", body.len()).as_bytes());
-        content.extend_from_slice(b"\r\n");
-        content.extend_from_slice(body);
-
-        let msg = make_sip_message(&content);
-        let parsed = msg.parse().unwrap();
-
+        let parsed = parsed_with_headers(
+            "jf-unescape",
+            &["Content-Type: application/json"],
+            br#"{"invite":"INVITE sip:host\r\nTo: <sip:host>\r\n"}"#,
+        );
         let invite = parsed.json_field("invite").unwrap();
         assert!(
             invite.contains("INVITE sip:host\r\nTo: <sip:host>\r\n"),
@@ -256,20 +259,11 @@ mod tests {
 
     #[test]
     fn json_field_plus_json_content_type() {
-        let body = br#"{"cancelTimestamp":"2025-12-14T05:35:03.269Z"}"#;
-        let mut content = Vec::new();
-        content.extend_from_slice(b"NOTIFY sip:host SIP/2.0\r\n");
-        content.extend_from_slice(b"Call-ID: jf-plus@host\r\n");
-        content.extend_from_slice(
-            b"Content-Type: application/emergencyCallData.AbandonedCall+json\r\n",
+        let parsed = parsed_with_headers(
+            "jf-plus",
+            &["Content-Type: application/emergencyCallData.AbandonedCall+json"],
+            br#"{"cancelTimestamp":"2025-12-14T05:35:03.269Z"}"#,
         );
-        content.extend_from_slice(format!("Content-Length: {}\r\n", body.len()).as_bytes());
-        content.extend_from_slice(b"\r\n");
-        content.extend_from_slice(body);
-
-        let msg = make_sip_message(&content);
-        let parsed = msg.parse().unwrap();
-
         assert_eq!(
             parsed.json_field("cancelTimestamp"),
             Some("2025-12-14T05:35:03.269Z".to_string())

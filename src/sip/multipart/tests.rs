@@ -1,4 +1,3 @@
-use super::parse_multipart_body;
 use crate::finders::CRLF;
 use crate::sip::test_support::{make_multipart_invite, make_sip_message, parsed_with_headers};
 use crate::types::{Headers, MimePart, SipMessage};
@@ -361,11 +360,19 @@ fn body_as_parts_truncated_multipart() {
     assert!(parsed.body_parts().is_some());
 }
 
+fn split_on_b(call_id: &str, body: &[u8]) -> Vec<MimePart> {
+    parsed_with_headers(call_id, &["Content-Type: multipart/mixed;boundary=b"], body)
+        .body_parts()
+        .expect("boundary b must split this body")
+}
+
 #[test]
 fn multipart_truncated_trailing_part() {
-    let body = b"--b\r\nContent-Type: application/sdp\r\n\r\nv=0\r\n\
-        --b\r\nContent-Type: application/pidf+xml\r\n\r\n<presence";
-    let parts = parse_multipart_body(body, "b");
+    let parts = split_on_b(
+        "trunc-trailing",
+        b"--b\r\nContent-Type: application/sdp\r\n\r\nv=0\r\n\
+            --b\r\nContent-Type: application/pidf+xml\r\n\r\n<presence",
+    );
     assert_eq!(parts.len(), 2);
     assert_eq!(parts[0].body, b"v=0");
     assert_eq!(parts[1].content_type(), Some("application/pidf+xml"));
@@ -374,17 +381,21 @@ fn multipart_truncated_trailing_part() {
 
 #[test]
 fn multipart_truncated_inside_close_delimiter() {
-    let body = b"--b\r\nContent-Type: application/sdp\r\n\r\nv=0\r\n--b";
-    let parts = parse_multipart_body(body, "b");
+    let parts = split_on_b(
+        "trunc-close",
+        b"--b\r\nContent-Type: application/sdp\r\n\r\nv=0\r\n--b",
+    );
     assert_eq!(parts.len(), 1);
     assert_eq!(parts[0].body, b"v=0");
 }
 
 #[test]
 fn multipart_preamble_substring_no_false_part() {
-    let body = b"preamble mentions --b in passing\r\n\
-        --b\r\nContent-Type: application/sdp\r\n\r\nv=0\r\n--b--";
-    let parts = parse_multipart_body(body, "b");
+    let parts = split_on_b(
+        "preamble-substring",
+        b"preamble mentions --b in passing\r\n\
+            --b\r\nContent-Type: application/sdp\r\n\r\nv=0\r\n--b--",
+    );
     assert_eq!(parts.len(), 1);
     assert_eq!(parts[0].content_type(), Some("application/sdp"));
     assert_eq!(parts[0].body, b"v=0");
@@ -392,18 +403,21 @@ fn multipart_preamble_substring_no_false_part() {
 
 #[test]
 fn multipart_boundary_prefix_collision() {
-    let body =
-        b"--b\r\nContent-Type: text/plain\r\n\r\nouter\r\n--b2\r\ninner text\r\n--b2--\r\n--b--";
-    let parts = parse_multipart_body(body, "b");
+    let parts = split_on_b(
+        "prefix-collision",
+        b"--b\r\nContent-Type: text/plain\r\n\r\nouter\r\n--b2\r\ninner text\r\n--b2--\r\n--b--",
+    );
     assert_eq!(parts.len(), 1);
     assert_eq!(parts[0].body, b"outer\r\n--b2\r\ninner text\r\n--b2--");
 }
 
 #[test]
 fn multipart_delimiter_transport_padding() {
-    let body = b"--b \t\r\nContent-Type: application/sdp\r\n\r\nv=0\r\n\
-        --b  \r\nContent-Type: application/pidf+xml\r\n\r\n<presence/>\r\n--b--";
-    let parts = parse_multipart_body(body, "b");
+    let parts = split_on_b(
+        "transport-padding",
+        b"--b \t\r\nContent-Type: application/sdp\r\n\r\nv=0\r\n\
+            --b  \r\nContent-Type: application/pidf+xml\r\n\r\n<presence/>\r\n--b--",
+    );
     assert_eq!(parts.len(), 2);
     assert_eq!(parts[0].body, b"v=0");
     assert_eq!(parts[1].body, b"<presence/>");
@@ -411,8 +425,10 @@ fn multipart_delimiter_transport_padding() {
 
 #[test]
 fn multipart_no_preamble_delimiter_at_offset_zero() {
-    let body = b"--b\r\nContent-Type: application/sdp\r\n\r\nv=0\r\n--b--";
-    let parts = parse_multipart_body(body, "b");
+    let parts = split_on_b(
+        "no-preamble",
+        b"--b\r\nContent-Type: application/sdp\r\n\r\nv=0\r\n--b--",
+    );
     assert_eq!(parts.len(), 1);
     assert_eq!(parts[0].body, b"v=0");
 }
