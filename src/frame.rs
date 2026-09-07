@@ -616,8 +616,11 @@ impl<R: Read> Iterator for FrameIterator<R> {
         // then fall back to scanning. This handles file concatenation where \x0B\n
         // is followed by garbage from the next file's truncated first frame.
         loop {
-            // Ensure we have enough data to check the expected position
-            while self.buf.len() <= expected_end + 1 && !self.eof {
+            // Ensure we have enough data to check the expected position, but
+            // never buffer a declared count further than a frame can reach:
+            // past that, boundary scanning takes over.
+            let fill_to = (expected_end + 1).min(content_start + MAX_PARTIAL_FRAME);
+            while self.buf.len() <= fill_to && !self.eof {
                 if let Err(e) = self.fill_buf() {
                     return Some(Err(ParseError::Io(e)));
                 }
