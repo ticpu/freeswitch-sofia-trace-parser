@@ -34,10 +34,16 @@ use crate::types::{
 /// ```
 pub struct MessageIterator<R> {
     frames: FrameIterator<R>,
-    buffers: HashMap<(Direction, String), ConnectionBuffer>,
+    buffers: HashMap<ConnectionKey, ConnectionBuffer>,
     ready: VecDeque<SipMessage>,
     exhausted: bool,
     clock: StaleClock,
+}
+
+#[derive(Clone, PartialEq, Eq, Hash)]
+struct ConnectionKey {
+    direction: Direction,
+    address: String,
 }
 
 struct ConnectionBuffer {
@@ -97,8 +103,8 @@ impl<R: std::io::Read> MessageIterator<R> {
             }
             if buf.content.is_empty() {
                 trace!(
-                    address = %key.1,
-                    direction = %key.0,
+                    address = %key.address,
+                    direction = %key.direction,
                     elapsed_secs = clock.now().saturating_sub(buf.last_seen),
                     "evicted empty stale connection buffer"
                 );
@@ -117,27 +123,16 @@ impl<R: std::io::Read> MessageIterator<R> {
     }
 
     fn flush_all(&mut self) {
-        let keys: Vec<_> = self.buffers.keys().cloned().collect();
-        for key in keys {
-            if let Some(buf) = self.buffers.get_mut(&key) {
-                let msgs = extract_complete(buf, &key);
-                self.ready.extend(msgs);
+        for (key, mut buf) in std::mem::take(&mut self.buffers) {
+            extract_complete(&mut buf, &key, &mut self.ready);
 
-                if !buf.content.is_empty() {
-                    let content = std::mem::take(&mut buf.content);
-                    self.ready.push_back(SipMessage {
-                        direction: key.0,
-                        transport: buf.transport,
-                        address: key.1.clone(),
-                        timestamp: buf.timestamp,
-                        content,
-                        frame_count: buf.frame_count,
-                    });
-                    buf.frame_count = 0;
-                }
+            if !buf.content.is_empty() {
+                let content = std::mem::take(&mut buf.content);
+                let frame_count = buf.frame_count;
+                self.ready
+                    .push_back(message(&buf, &key, content, frame_count));
             }
         }
-        self.buffers.clear();
     }
 }
 
@@ -172,7 +167,10 @@ impl<R: std::io::Read> Iterator for MessageIterator<R> {
                         self.sweep_stale_buffers();
                     }
 
-                    let key = (frame.direction, frame.address);
+                    let key = ConnectionKey {
+                        direction: frame.direction,
+                        address: frame.address,
+                    };
 
                     let buf = match self.buffers.get_mut(&key) {
                         Some(buf) => buf,
@@ -194,15 +192,14 @@ impl<R: std::io::Read> Iterator for MessageIterator<R> {
                     trace!(
                         frame = buf.frame_count + 1,
                         bytes = frame.content.len(),
-                        address = %key.1,
+                        address = %key.address,
                         "buffering TCP frame"
                     );
 
                     buf.content.extend_from_slice(&frame.content);
                     buf.frame_count += 1;
 
-                    let msgs = extract_complete(buf, &key);
-                    self.ready.extend(msgs);
+                    extract_complete(buf, &key, &mut self.ready);
 
                     if buf.content.is_empty() {
                         self.buffers.remove(&key);
@@ -223,130 +220,156 @@ impl<R: std::io::Read> Iterator for MessageIterator<R> {
     }
 }
 
-/// Extract complete SIP messages from a connection buffer.
-/// Messages are complete when we find headers (\r\n\r\n) and have
-/// Content-Length bytes of body available.
-fn extract_complete(buf: &mut ConnectionBuffer, key: &(Direction, String)) -> Vec<SipMessage> {
-    let mut messages = Vec::new();
-
-    loop {
-        if buf.content.is_empty() {
-            break;
-        }
-
-        // Skip non-SIP prefix (body fragments from incomplete prior messages)
-        match sip_start(&buf.content) {
-            SipStart::Yes => {}
-            SipStart::NeedMore => break, // Start line incomplete, wait for more data
-            SipStart::No => {
-                // Drain leading whitespace (CRLF padding, bare LF keep-alives, etc.)
-                let ws_len = buf
-                    .content
-                    .iter()
-                    .position(|&b| !matches!(b, b'\r' | b'\n' | b' ' | b'\t'))
-                    .unwrap_or(buf.content.len());
-
-                if ws_len > 0 {
-                    if ws_len == buf.content.len() {
-                        trace!(
-                            bytes = ws_len,
-                            address = %key.1,
-                            "drained transport whitespace"
-                        );
-                        buf.content.clear();
-                        buf.frame_count = 0;
-                        break;
-                    }
-                    match sip_start(&buf.content[ws_len..]) {
-                        SipStart::Yes => {
-                            trace!(bytes = ws_len, "drained inter-message whitespace padding");
-                            buf.content.drain(..ws_len);
-                            continue;
-                        }
-                        SipStart::NeedMore => {
-                            trace!(bytes = ws_len, "drained inter-message whitespace padding");
-                            buf.content.drain(..ws_len);
-                            break;
-                        }
-                        SipStart::No => {}
-                    }
-                }
-
-                match find_sip_start(&buf.content) {
-                    Some(offset) if offset > 0 => {
-                        warn!(
-                            skipped_bytes = offset,
-                            address = %key.1,
-                            "skipped non-SIP prefix in TCP buffer"
-                        );
-                        buf.content.drain(..offset);
-                        continue;
-                    }
-                    _ => break, // No SIP start found, wait for more data
-                }
-            }
-        }
-
-        // Find header/body boundary
-        let header_end = match CRLFCRLF.find(&buf.content) {
-            Some(offset) => offset,
-            None => break, // Headers incomplete, wait for more data
-        };
-        let body_start = header_end + 4;
-
-        let msg_end = match find_content_length(&buf.content) {
-            Some(cl) => {
-                let end = body_start + cl;
-                if end > buf.content.len() {
-                    break; // Body incomplete, wait for more data
-                }
-                end
-            }
-            None => body_start, // No CL = no body (RFC 3261 Section 18.3)
-        };
-
-        let remaining = buf.content.split_off(msg_end);
-        let msg_content = std::mem::replace(&mut buf.content, remaining);
-
-        // Skip trailing CRLF between messages
-        while buf.content.len() >= 2 && buf.content[0] == b'\r' && buf.content[1] == b'\n' {
-            buf.content.drain(..2);
-        }
-
-        let frame_count = if messages.is_empty() {
-            buf.frame_count
-        } else {
-            0
-        };
-
-        if frame_count > 1 {
-            debug!(
-                frame_count,
-                bytes = msg_content.len(),
-                address = %key.1,
-                "extracted reassembled TCP message"
-            );
-        }
-
-        messages.push(SipMessage {
-            direction: key.0,
-            transport: buf.transport,
-            address: key.1.clone(),
-            timestamp: buf.timestamp,
-            content: msg_content,
-            frame_count,
-        });
-
-        buf.frame_count = 0;
-    }
-
-    messages
+/// Where the buffer stands relative to the next SIP message start.
+enum Resync {
+    Ready,
+    Retry,
+    Wait,
 }
 
-/// Find Content-Length header value in SIP message bytes.
-/// Returns the value as usize if found.
-fn find_content_length(data: &[u8]) -> Option<usize> {
-    let header_end = CRLFCRLF.find(data)?;
+/// Extract complete SIP messages from a connection buffer into `ready`.
+/// Messages are complete when we find headers (\r\n\r\n) and have
+/// Content-Length bytes of body available.
+fn extract_complete(
+    buf: &mut ConnectionBuffer,
+    key: &ConnectionKey,
+    ready: &mut VecDeque<SipMessage>,
+) {
+    loop {
+        if buf.content.is_empty() {
+            return;
+        }
+        match resync_to_sip_start(buf, key) {
+            Resync::Ready => {}
+            Resync::Retry => continue,
+            Resync::Wait => return,
+        }
+        if !split_one_message(buf, key, ready) {
+            return;
+        }
+    }
+}
+
+/// Drop whatever precedes the next SIP message start in the buffer.
+fn resync_to_sip_start(buf: &mut ConnectionBuffer, key: &ConnectionKey) -> Resync {
+    match sip_start(&buf.content) {
+        SipStart::Yes => return Resync::Ready,
+        SipStart::NeedMore => return Resync::Wait, // Start line incomplete, wait for more data
+        SipStart::No => {}
+    }
+
+    // Drain leading whitespace (CRLF padding, bare LF keep-alives, etc.)
+    let ws_len = buf
+        .content
+        .iter()
+        .position(|&b| !matches!(b, b'\r' | b'\n' | b' ' | b'\t'))
+        .unwrap_or(buf.content.len());
+
+    if ws_len > 0 {
+        if ws_len == buf.content.len() {
+            trace!(
+                bytes = ws_len,
+                address = %key.address,
+                "drained transport whitespace"
+            );
+            buf.content.clear();
+            buf.frame_count = 0;
+            return Resync::Wait;
+        }
+        match sip_start(&buf.content[ws_len..]) {
+            SipStart::Yes => {
+                trace!(bytes = ws_len, "drained inter-message whitespace padding");
+                buf.content.drain(..ws_len);
+                return Resync::Retry;
+            }
+            SipStart::NeedMore => {
+                trace!(bytes = ws_len, "drained inter-message whitespace padding");
+                buf.content.drain(..ws_len);
+                return Resync::Wait;
+            }
+            SipStart::No => {}
+        }
+    }
+
+    match find_sip_start(&buf.content) {
+        Some(offset) if offset > 0 => {
+            warn!(
+                skipped_bytes = offset,
+                address = %key.address,
+                "skipped non-SIP prefix in TCP buffer"
+            );
+            buf.content.drain(..offset);
+            Resync::Retry
+        }
+        _ => Resync::Wait, // No SIP start found, wait for more data
+    }
+}
+
+/// Split one complete message off the front of the buffer. False means the
+/// message is still arriving and the buffer keeps its bytes.
+fn split_one_message(
+    buf: &mut ConnectionBuffer,
+    key: &ConnectionKey,
+    ready: &mut VecDeque<SipMessage>,
+) -> bool {
+    let header_end = match CRLFCRLF.find(&buf.content) {
+        Some(offset) => offset,
+        None => return false, // Headers incomplete, wait for more data
+    };
+    let body_start = header_end + 4;
+
+    let msg_end = match find_content_length(&buf.content, header_end) {
+        Some(cl) => {
+            let end = body_start + cl;
+            if end > buf.content.len() {
+                return false; // Body incomplete, wait for more data
+            }
+            end
+        }
+        None => body_start, // No CL = no body (RFC 3261 Section 18.3)
+    };
+
+    let remaining = buf.content.split_off(msg_end);
+    let msg_content = std::mem::replace(&mut buf.content, remaining);
+
+    // Skip trailing CRLF between messages
+    while buf.content.len() >= 2 && buf.content[0] == b'\r' && buf.content[1] == b'\n' {
+        buf.content.drain(..2);
+    }
+
+    let frame_count = buf.frame_count;
+    if frame_count > 1 {
+        debug!(
+            frame_count,
+            bytes = msg_content.len(),
+            address = %key.address,
+            "extracted reassembled TCP message"
+        );
+    }
+
+    ready.push_back(message(buf, key, msg_content, frame_count));
+    buf.frame_count = 0;
+    true
+}
+
+fn message(
+    buf: &ConnectionBuffer,
+    key: &ConnectionKey,
+    content: Vec<u8>,
+    frame_count: usize,
+) -> SipMessage {
+    SipMessage {
+        direction: key.direction,
+        transport: buf.transport,
+        address: key.address.clone(),
+        timestamp: buf.timestamp,
+        content,
+        frame_count,
+    }
+}
+
+/// Find Content-Length header value in the header block ending at `header_end`.
+fn find_content_length(data: &[u8], header_end: usize) -> Option<usize> {
     let headers = &data[..header_end];
 
     let mut pos = 0;
@@ -435,6 +458,35 @@ fn find_sip_start(data: &[u8]) -> Option<usize> {
 mod tests {
     use super::*;
     use crate::types::Direction;
+
+    fn buffer_with(content: Vec<u8>) -> ConnectionBuffer {
+        ConnectionBuffer {
+            transport: Transport::Tcp,
+            timestamp: Timestamp::TimeOnly {
+                hour: 0,
+                min: 0,
+                sec: 0,
+                usec: 0,
+            },
+            content,
+            frame_count: 1,
+            last_seen: 0,
+        }
+    }
+
+    fn extracted(buf: &mut ConnectionBuffer) -> Vec<SipMessage> {
+        let key = ConnectionKey {
+            direction: Direction::Recv,
+            address: "[::1]:5060".to_string(),
+        };
+        let mut ready = VecDeque::new();
+        extract_complete(buf, &key, &mut ready);
+        ready.into()
+    }
+
+    fn content_length(data: &[u8]) -> Option<usize> {
+        find_content_length(data, CRLFCRLF.find(data)?)
+    }
 
     fn make_frame(
         direction: Direction,
@@ -675,19 +727,19 @@ mod tests {
     #[test]
     fn find_content_length_standard() {
         let data = b"NOTIFY sip:a SIP/2.0\r\nContent-Length: 42\r\n\r\n";
-        assert_eq!(find_content_length(data), Some(42));
+        assert_eq!(content_length(data), Some(42));
     }
 
     #[test]
     fn find_content_length_compact() {
         let data = b"NOTIFY sip:a SIP/2.0\r\nl: 42\r\n\r\n";
-        assert_eq!(find_content_length(data), Some(42));
+        assert_eq!(content_length(data), Some(42));
     }
 
     #[test]
     fn find_content_length_padded_before_colon() {
         let data = b"NOTIFY sip:a SIP/2.0\r\nContent-Length \t: 5\r\n\r\nhello";
-        assert_eq!(find_content_length(data), Some(5));
+        assert_eq!(content_length(data), Some(5));
     }
 
     #[test]
@@ -709,7 +761,7 @@ mod tests {
     #[test]
     fn find_content_length_missing() {
         let data = b"NOTIFY sip:a SIP/2.0\r\nCSeq: 1 NOTIFY\r\n\r\n";
-        assert_eq!(find_content_length(data), None);
+        assert_eq!(content_length(data), None);
     }
 
     #[test]
@@ -811,20 +863,8 @@ mod tests {
         content.extend_from_slice(b"\r\n");
         content.extend_from_slice(msg2);
 
-        let key = (Direction::Recv, "[::1]:5060".to_string());
-        let mut buf = ConnectionBuffer {
-            transport: Transport::Tcp,
-            timestamp: Timestamp::TimeOnly {
-                hour: 0,
-                min: 0,
-                sec: 0,
-                usec: 0,
-            },
-            content,
-            frame_count: 1,
-            last_seen: 0,
-        };
-        let msgs = extract_complete(&mut buf, &key);
+        let mut buf = buffer_with(content);
+        let msgs = extracted(&mut buf);
         assert_eq!(msgs.len(), 2);
         assert_eq!(msgs[0].content, msg1);
         assert_eq!(msgs[1].content, msg2);
@@ -838,20 +878,8 @@ mod tests {
         content.extend_from_slice(prefix);
         content.extend_from_slice(msg);
 
-        let key = (Direction::Recv, "[::1]:5060".to_string());
-        let mut buf = ConnectionBuffer {
-            transport: Transport::Tcp,
-            timestamp: Timestamp::TimeOnly {
-                hour: 0,
-                min: 0,
-                sec: 0,
-                usec: 0,
-            },
-            content,
-            frame_count: 1,
-            last_seen: 0,
-        };
-        let msgs = extract_complete(&mut buf, &key);
+        let mut buf = buffer_with(content);
+        let msgs = extracted(&mut buf);
         assert_eq!(msgs.len(), 1);
         assert_eq!(msgs[0].content, msg);
     }
@@ -878,20 +906,8 @@ mod tests {
         content.extend_from_slice(b"</conference-info>\r\n");
         content.extend_from_slice(b"XYZZY sip:a SI");
 
-        let key = (Direction::Recv, "[::1]:5060".to_string());
-        let mut buf = ConnectionBuffer {
-            transport: Transport::Tcp,
-            timestamp: Timestamp::TimeOnly {
-                hour: 0,
-                min: 0,
-                sec: 0,
-                usec: 0,
-            },
-            content,
-            frame_count: 1,
-            last_seen: 0,
-        };
-        let msgs = extract_complete(&mut buf, &key);
+        let mut buf = buffer_with(content);
+        let msgs = extracted(&mut buf);
         assert!(msgs.is_empty());
         assert_eq!(
             buf.content, b"XYZZY sip:a SI",
@@ -904,20 +920,8 @@ mod tests {
         // Headers complete but body is missing
         let content = b"INVITE sip:a SIP/2.0\r\nContent-Length: 100\r\n\r\npartial".to_vec();
 
-        let key = (Direction::Recv, "[::1]:5060".to_string());
-        let mut buf = ConnectionBuffer {
-            transport: Transport::Tcp,
-            timestamp: Timestamp::TimeOnly {
-                hour: 0,
-                min: 0,
-                sec: 0,
-                usec: 0,
-            },
-            content,
-            frame_count: 1,
-            last_seen: 0,
-        };
-        let msgs = extract_complete(&mut buf, &key);
+        let mut buf = buffer_with(content);
+        let msgs = extracted(&mut buf);
         assert!(msgs.is_empty(), "should wait for body to complete");
         assert!(!buf.content.is_empty(), "buffer should retain data");
     }
@@ -927,20 +931,8 @@ mod tests {
         // Headers not complete (no \r\n\r\n)
         let content = b"INVITE sip:a SIP/2.0\r\nContent-Length: 0\r\n".to_vec();
 
-        let key = (Direction::Recv, "[::1]:5060".to_string());
-        let mut buf = ConnectionBuffer {
-            transport: Transport::Tcp,
-            timestamp: Timestamp::TimeOnly {
-                hour: 0,
-                min: 0,
-                sec: 0,
-                usec: 0,
-            },
-            content,
-            frame_count: 1,
-            last_seen: 0,
-        };
-        let msgs = extract_complete(&mut buf, &key);
+        let mut buf = buffer_with(content);
+        let msgs = extracted(&mut buf);
         assert!(msgs.is_empty(), "should wait for headers to complete");
     }
 
