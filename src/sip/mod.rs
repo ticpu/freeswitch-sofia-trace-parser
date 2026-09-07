@@ -1,11 +1,17 @@
+use std::borrow::Cow;
+
 use sip_header::extract_all_headers;
 
 use crate::finders::CRLF;
 use crate::frame::ParseError;
 use crate::message::MessageIterator;
+use crate::sip::content_type::{extract_boundary, normalize_media_type};
+use crate::sip::json::unescape_json_body;
+use crate::sip::multipart::{is_multipart_type, split_multipart};
 use crate::sip::startline::{bytes_to_str, parse_first_line, parse_first_line_ref, StartLineRef};
 use crate::types::{
-    Headers, ParseStats, ParsedSipMessage, SipMessage, SkipTracking, UnparsedRegion,
+    Headers, MimePart, ParseStats, ParsedSipMessage, SipFragment, SipMessage, SkipTracking,
+    UnparsedRegion,
 };
 
 pub(crate) mod content_type;
@@ -19,6 +25,88 @@ mod test_support;
 pub use content_type::is_json_content_type;
 pub use fragment::parse_sipfrag;
 pub(crate) use startline::{sip_start, SipStart};
+
+/// Everything a SIP header block plus a body answers, written once. The three
+/// carriers each expose these as inherent methods that delegate here, so a
+/// per-part loop cannot meet a carrier that answers one of them differently.
+pub(crate) trait HasHeaders {
+    fn headers(&self) -> &Headers;
+
+    fn body(&self) -> &[u8];
+
+    fn header_value(&self, name: &str) -> Option<&str> {
+        self.headers().value(name)
+    }
+
+    fn content_type(&self) -> Option<&str> {
+        self.headers()
+            .value("Content-Type")
+            .or_else(|| self.headers().value("c"))
+    }
+
+    fn media_type(&self) -> Option<Cow<'_, str>> {
+        self.content_type().map(normalize_media_type)
+    }
+
+    fn is_multipart(&self) -> bool {
+        is_multipart_type(self.content_type())
+    }
+
+    fn multipart_boundary(&self) -> Option<&str> {
+        extract_boundary(self.content_type()?)
+    }
+
+    fn body_parts(&self) -> Option<Vec<MimePart>> {
+        split_multipart(self.content_type(), self.body())
+    }
+
+    fn body_text(&self) -> Cow<'_, str> {
+        match self.content_type() {
+            Some(ct) if is_json_content_type(ct) => Cow::Owned(unescape_json_body(self.body())),
+            _ => String::from_utf8_lossy(self.body()),
+        }
+    }
+
+    fn json_field(&self, key: &str) -> Option<String> {
+        let ct = self.content_type()?;
+        if !is_json_content_type(ct) {
+            return None;
+        }
+        let value: serde_json::Value = serde_json::from_slice(self.body()).ok()?;
+        let obj = value.as_object()?;
+        obj.get(key)?.as_str().map(|s| s.to_string())
+    }
+}
+
+impl HasHeaders for ParsedSipMessage {
+    fn headers(&self) -> &Headers {
+        &self.headers
+    }
+
+    fn body(&self) -> &[u8] {
+        &self.body
+    }
+}
+
+impl HasHeaders for MimePart {
+    fn headers(&self) -> &Headers {
+        &self.headers
+    }
+
+    fn body(&self) -> &[u8] {
+        &self.body
+    }
+}
+
+impl HasHeaders for SipFragment {
+    fn headers(&self) -> &Headers {
+        &self.headers
+    }
+
+    fn body(&self) -> &[u8] {
+        &self.body
+    }
+}
 
 impl SipMessage {
     /// Parse this reassembled message into a [`ParsedSipMessage`] with typed

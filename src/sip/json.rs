@@ -1,7 +1,7 @@
 use std::borrow::Cow;
 
-use crate::sip::content_type::is_json_content_type;
-use crate::types::ParsedSipMessage;
+use crate::sip::HasHeaders;
+use crate::types::{MimePart, ParsedSipMessage};
 
 impl ParsedSipMessage {
     /// Content-type-aware body text. For JSON content types (`application/json`
@@ -9,29 +9,33 @@ impl ParsedSipMessage {
     /// (`\r\n` to CRLF, `\t` to tab, `\uXXXX` to Unicode). Passthrough for
     /// all other content types.
     pub fn body_text(&self) -> Cow<'_, str> {
-        if let Some(ct) = self.content_type() {
-            if is_json_content_type(ct) {
-                return Cow::Owned(unescape_json_body(&self.body));
-            }
-        }
-        self.body_data()
+        HasHeaders::body_text(self)
     }
 
     /// Parse the body as JSON and return the unescaped string value of a
     /// top-level key. Returns `None` if the content type is not JSON, the
     /// body is invalid JSON, the key is missing, or the value is not a string.
     pub fn json_field(&self, key: &str) -> Option<String> {
-        let ct = self.content_type()?;
-        if !is_json_content_type(ct) {
-            return None;
-        }
-        let value: serde_json::Value = serde_json::from_slice(&self.body).ok()?;
-        let obj = value.as_object()?;
-        obj.get(key)?.as_str().map(|s| s.to_string())
+        HasHeaders::json_field(self, key)
     }
 }
 
-fn unescape_json_body(input: &[u8]) -> String {
+impl MimePart {
+    /// Content-type-aware body text, as for
+    /// [`ParsedSipMessage::body_text`]: JSON parts come back unescaped,
+    /// everything else passes through as lossy UTF-8.
+    pub fn body_text(&self) -> Cow<'_, str> {
+        HasHeaders::body_text(self)
+    }
+
+    /// Parse this part's body as JSON and return the unescaped string value of
+    /// a top-level key, as for [`ParsedSipMessage::json_field`].
+    pub fn json_field(&self, key: &str) -> Option<String> {
+        HasHeaders::json_field(self, key)
+    }
+}
+
+pub(crate) fn unescape_json_body(input: &[u8]) -> String {
     let s = String::from_utf8_lossy(input);
     let mut out = String::with_capacity(s.len());
     let mut chars = s.chars();

@@ -2,9 +2,8 @@ use std::borrow::Cow;
 
 use crate::finders::CRLF;
 use crate::frame::ParseError;
-use crate::sip::content_type::normalize_media_type;
 use crate::sip::startline::{is_header_line, parse_first_line};
-use crate::sip::{parse_headers, split_headers_body};
+use crate::sip::{parse_headers, split_headers_body, HasHeaders};
 use crate::types::{MimePart, SipFragment};
 
 /// Parse a `message/sipfrag` body (RFC 3420) — any prefix of a SIP message.
@@ -53,7 +52,7 @@ impl SipFragment {
     /// `application/sdp` from `Application/SDP; charset=utf-8`. Use this to
     /// dispatch on the type rather than matching the raw header value.
     pub fn media_type(&self) -> Option<Cow<'_, str>> {
-        self.content_type().map(normalize_media_type)
+        HasHeaders::media_type(self)
     }
 }
 

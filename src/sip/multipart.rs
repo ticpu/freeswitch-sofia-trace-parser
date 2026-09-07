@@ -4,7 +4,7 @@ use memchr::memmem;
 
 use crate::finders::{CRLF, CRLFCRLF};
 use crate::sip::content_type::{canonical_body_header, extract_boundary, normalize_media_type};
-use crate::sip::parse_headers;
+use crate::sip::{parse_headers, HasHeaders};
 use crate::types::{Headers, MimePart, ParsedSipMessage};
 
 #[cfg(test)]
@@ -29,17 +29,17 @@ impl MimePart {
     /// `application/sdp` from `Application/SDP; charset=utf-8`. Use this to
     /// dispatch on the type rather than matching the raw header value.
     pub fn media_type(&self) -> Option<Cow<'_, str>> {
-        self.content_type().map(normalize_media_type)
+        HasHeaders::media_type(self)
     }
 
     /// Returns `true` if this part's Content-Type starts with `multipart/`.
     pub fn is_multipart(&self) -> bool {
-        is_multipart_type(self.content_type())
+        HasHeaders::is_multipart(self)
     }
 
     /// Extract the MIME boundary string from this part's Content-Type header.
     pub fn multipart_boundary(&self) -> Option<&str> {
-        extract_boundary(self.content_type()?)
+        HasHeaders::multipart_boundary(self)
     }
 
     /// Split a nested multipart part into its own [`MimePart`]s.
@@ -50,7 +50,7 @@ impl MimePart {
     /// with its `multipart/*` type intact, to be split by another explicit
     /// call. Depth is the caller's decision.
     pub fn body_parts(&self) -> Option<Vec<MimePart>> {
-        split_multipart(self.content_type(), &self.body)
+        HasHeaders::body_parts(self)
     }
 }
 
@@ -59,24 +59,24 @@ impl ParsedSipMessage {
     /// `multipart/mixed` from `multipart/mixed;boundary=abc`. Use this to
     /// dispatch on the type rather than matching the raw header value.
     pub fn media_type(&self) -> Option<Cow<'_, str>> {
-        self.content_type().map(normalize_media_type)
+        HasHeaders::media_type(self)
     }
 
     /// Returns `true` if the Content-Type starts with `multipart/`.
     pub fn is_multipart(&self) -> bool {
-        is_multipart_type(self.content_type())
+        HasHeaders::is_multipart(self)
     }
 
     /// Extract the MIME boundary string from the Content-Type header.
     pub fn multipart_boundary(&self) -> Option<&str> {
-        extract_boundary(self.content_type()?)
+        HasHeaders::multipart_boundary(self)
     }
 
     /// Split a multipart body into individual [`MimePart`]s.
     /// Returns `None` when the Content-Type carries no `boundary` parameter or
     /// that boundary yields no parts.
     pub fn body_parts(&self) -> Option<Vec<MimePart>> {
-        split_multipart(self.content_type(), &self.body)
+        HasHeaders::body_parts(self)
     }
 
     /// The body as parts, whatever its Content-Type: the multipart children

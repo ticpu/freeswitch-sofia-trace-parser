@@ -2,6 +2,8 @@ use std::borrow::Cow;
 use std::fmt;
 use std::net::SocketAddr;
 
+use crate::sip::HasHeaders;
+
 /// mod_sofia brackets IPv4 like IPv6 (`[198.51.100.7]:5060`); anything that
 /// isn't an ip:port shape yields `None` rather than a guess.
 fn parse_socket_addr(address: &str) -> Option<SocketAddr> {
@@ -672,14 +674,13 @@ pub struct SipFragment {
 impl SipFragment {
     /// Case-insensitive header lookup, first match in wire order.
     pub fn header_value(&self, name: &str) -> Option<&str> {
-        self.headers.value(name)
+        HasHeaders::header_value(self, name)
     }
 
     /// Returns the Content-Type header value. Checks both `Content-Type` and
     /// the compact form `c`.
     pub fn content_type(&self) -> Option<&str> {
-        self.header_value("Content-Type")
-            .or_else(|| self.header_value("c"))
+        HasHeaders::content_type(self)
     }
 }
 
@@ -696,14 +697,12 @@ impl MimePart {
     /// Returns the Content-Type header value. Checks both `Content-Type` and
     /// the compact form `c`.
     pub fn content_type(&self) -> Option<&str> {
-        self.headers
-            .value("Content-Type")
-            .or_else(|| self.headers.value("c"))
+        HasHeaders::content_type(self)
     }
 
     /// Case-insensitive header lookup, first match in wire order.
     pub fn header_value(&self, name: &str) -> Option<&str> {
-        self.headers.value(name)
+        HasHeaders::header_value(self, name)
     }
 
     /// Returns the Content-ID header value, if present.
@@ -752,8 +751,7 @@ impl ParsedSipMessage {
     /// Returns the Content-Type header value. Checks both `Content-Type` and
     /// the compact form `c`.
     pub fn content_type(&self) -> Option<&str> {
-        self.header_value("Content-Type")
-            .or_else(|| self.header_value("c"))
+        HasHeaders::content_type(self)
     }
 
     /// Returns the Content-Length header value as `usize`. Checks both
@@ -810,7 +808,7 @@ impl ParsedSipMessage {
     /// Case-insensitive header lookup, first match in wire order. Compact
     /// forms are not resolved; the typed accessors above check both names.
     pub fn header_value(&self, name: &str) -> Option<&str> {
-        self.headers.value(name)
+        HasHeaders::header_value(self, name)
     }
 }
 
