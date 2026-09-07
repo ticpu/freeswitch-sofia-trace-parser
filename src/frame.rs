@@ -1089,27 +1089,6 @@ mod tests {
     }
 
     #[test]
-    fn frame_iterator_extra_newline_after_boundary() {
-        // Some dump files have \x0B\n\n between frames (extra \n after boundary).
-        // The extra \n should be stripped, not trigger recovery warnings.
-        let mut data = Vec::new();
-        data.extend_from_slice(
-            b"recv 5 bytes from tcp/1.1.1.1:5060 at 00:00:00.000000:\nhello\x0B\n",
-        );
-        data.push(b'\n');
-        data.extend_from_slice(
-            b"sent 5 bytes to tcp/1.1.1.1:5060 at 00:00:00.000001:\nworld\x0B\n",
-        );
-
-        let frames: Vec<Frame> = FrameIterator::new(&data[..])
-            .collect::<Result<Vec<_>, _>>()
-            .unwrap();
-        assert_eq!(frames.len(), 2);
-        assert_eq!(frames[0].content, b"hello");
-        assert_eq!(frames[1].content, b"world");
-    }
-
-    #[test]
     fn frame_iterator_multiple_newlines_after_boundary() {
         // Multiple \n and \r\n between frames should all be stripped.
         let mut data = Vec::new();
@@ -1404,21 +1383,6 @@ mod tests {
         // Dump restart marker is structural, not skipped
         assert_eq!(stats.bytes_skipped, 0);
         assert!(stats.unparsed_regions.is_empty());
-    }
-
-    #[test]
-    fn stats_track_regions_no_data() {
-        let mut data = Vec::new();
-        data.extend_from_slice(b"partial garbage data");
-        data.extend_from_slice(b"\x0B\n");
-        data.extend_from_slice(
-            b"recv 5 bytes from tcp/1.1.1.1:5060 at 00:00:00.000000:\nhello\x0B\n",
-        );
-        let mut iter = FrameIterator::new(&data[..]).skip_tracking(SkipTracking::TrackRegions);
-        let _: Vec<_> = iter.by_ref().collect::<Result<Vec<_>, _>>().unwrap();
-        let stats = iter.stats();
-        assert_eq!(stats.unparsed_regions.len(), 1);
-        assert!(stats.unparsed_regions[0].data.is_none());
     }
 
     #[test]

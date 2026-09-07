@@ -494,28 +494,7 @@ mod tests {
         addr: &str,
         content: &[u8],
     ) -> Vec<u8> {
-        let dir_str = match direction {
-            Direction::Recv => "recv",
-            Direction::Sent => "sent",
-        };
-        let prep = match direction {
-            Direction::Recv => "from",
-            Direction::Sent => "to",
-        };
-        let transport_str = match transport {
-            Transport::Tcp => "tcp",
-            Transport::Udp => "udp",
-            Transport::Tls => "tls",
-            Transport::Wss => "wss",
-        };
-        let header = format!(
-            "{dir_str} {} bytes {prep} {transport_str}/{addr} at 00:00:00.000000:\n",
-            content.len()
-        );
-        let mut data = header.into_bytes();
-        data.extend_from_slice(content);
-        data.extend_from_slice(b"\x0B\n");
-        data
+        make_frame_at(direction, transport, addr, content, "00:00:00.000000")
     }
 
     #[test]
