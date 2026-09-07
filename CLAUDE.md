@@ -36,14 +36,9 @@ cargo test --release --test level3_samples    # Level 3 integration tests (requi
 
 ## Release Workflow
 
-Before tagging a release:
-
-```sh
-cargo semver-checks --baseline-rev <previous-tag> --only-explicit-features
-cargo clippy --release -- -D warnings
-cargo test --release
-cargo build --release
-```
+Before tagging a release, run `scripts/pre-release.sh`. It runs semver-checks
+with cargo's default feature heuristic; `--only-explicit-features` resolves to
+an empty feature set here and would hide every `pcap` and `cli` API change.
 
 Tag with a signed annotated tag. Include a brief changelog in the tag message:
 
@@ -78,22 +73,30 @@ Always available, no external dependencies. Cover:
 
 Require production sample files in `samples/` (gitignored, contain PII).
 Tests skip gracefully if files are missing — they check `path.exists()` and return early.
+Shared helpers (`sample_dir`, `open_sample`, `list_dumps`, `assert_parse_stats`,
+`starts_with_sip_line`, `frame_count`, `method_histogram`, and the
+`MIN_PARSE_SUCCESS`/`MIN_HEADER_PRESENCE` thresholds) live in `tests/common/mod.rs`,
+included via `mod common;` in each level file.
 
 Sample files are raw binary FreeSWITCH dump files (~50-350MB each):
 
-- `esinet1-v4-tcp.dump.{20..29}` — TCP IPv4
-- `esinet1-v4-udp.dump.{20..29}` — UDP IPv4
-- `esinet1-v6-tls.dump.{20..29}` — TLS IPv6
-- `internal-v4.dump.{20..29}` — internal TCP IPv4
-- `internal-v6.dump.{20..29}` — internal TCP IPv6
+- `esinet1-v4-tcp.dump.{20..29,150,207..209}` — TCP IPv4
+- `esinet1-v4-udp.dump.{20..29,207..209}` — UDP IPv4
+- `esinet1-v6-tcp.dump.{205..207}` — TCP IPv6
+- `esinet1-v6-udp.dump.{205..207}` — UDP IPv6
+- `esinet1-v6-tls.dump.{20..29,126..129,193..195}` — TLS IPv6
+- `internal-v4.dump.{20..29,272..274}` — internal TCP IPv4
+- `internal-v6.dump.{20..29,269..271}` — internal TCP IPv6
 - `esinet1-v6-tls.dump.180` — TLS IPv6 with real traffic (INVITE/NOTIFY/BYE)
-- `esinet1-v4-tls.dump.{179,180}` — TLS IPv4 (180 has real traffic)
+- `esinet1-v4-tls.dump.{179,180,193..195}` — TLS IPv4 (180 has real traffic)
 - `esinet1-v4-tcp.dump.4` — TCP IPv4 with ESInet provider traffic
 
 Logrotate numbering: higher number = older file.
 
-Level 3 tests tolerate a small number of parse failures (~0.004% on TCP) caused by
-TCP reassembly edge cases producing fragments without valid SIP first lines.
+Level 3 tests tolerate a small number of parse failures below the
+`MIN_PARSE_SUCCESS` threshold in `tests/common/mod.rs` (0.1%), caused by
+TCP reassembly edge cases producing fragments without valid SIP first
+lines; the observed rate on TCP is ~0.004%.
 
 The `file_concatenation_two_dumps` test validates `Read::chain()` across two files
 (simulating `cat dump.29 dump.28 | parser`).
@@ -107,8 +110,26 @@ cargo test --release --test level2_samples -- --nocapture
 cargo test --release --test level3_samples -- --nocapture
 
 # Single test
-cargo test --release --test level1_samples esinet1_v4_tcp -- --nocapture
+cargo test --release --test level1_samples per_file_frame_parsing -- --nocapture
 ```
+
+### Torture tests (`torture/`)
+
+The sip-uri and PIDF-LO URI-parsing torture runs live in a standalone
+`freeswitch-sofia-trace-torture` crate outside this package (see
+`docs/design-rationale.md`, "Torture Corpus Outside the Package"), since
+their `eido` dependency has no crates.io release. Run with:
+
+```sh
+cargo test --release --manifest-path torture/Cargo.toml
+```
+
+### Pre-release checks
+
+`scripts/pre-release.sh` runs the full sequence `.claude/commands/release.md`
+front-loads before tagging — fmt, clippy, lib and cli+all-targets checks,
+lib and binary tests, semver-checks, `cargo publish --dry-run`, and (when
+`samples/` is present) the integration and torture suites above.
 
 ## Development Methodology — TDD
 
