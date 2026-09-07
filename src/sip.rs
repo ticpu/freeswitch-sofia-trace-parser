@@ -673,22 +673,18 @@ fn parse_hex4(hex: &str) -> Option<u16> {
 }
 
 fn extract_boundary(content_type: &str) -> Option<&str> {
-    let lower = content_type.to_ascii_lowercase();
-    let idx = lower.find("boundary=")?;
-    let after = &content_type[idx + 9..];
-
-    if let Some(after_quote) = after.strip_prefix('"') {
-        let end_quote = after_quote.find('"')?;
-        Some(&after_quote[..end_quote])
-    } else {
-        let end = after.find(';').unwrap_or(after.len());
-        let boundary = after[..end].trim();
-        if boundary.is_empty() {
-            None
-        } else {
-            Some(boundary)
+    content_type.split(';').skip(1).find_map(|param| {
+        let (key, value) = param.split_once('=')?;
+        if !key.trim().eq_ignore_ascii_case("boundary") {
+            return None;
         }
-    }
+        let value = value.trim();
+        let value = match value.strip_prefix('"') {
+            Some(quoted) => quoted.split('"').next().unwrap_or(quoted),
+            None => value,
+        };
+        (!value.is_empty()).then_some(value)
+    })
 }
 
 /// What follows a matched `--boundary` token, deciding whether the match is a
