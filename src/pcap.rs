@@ -110,7 +110,6 @@ impl Default for PcapConfig {
 pub enum PcapError {
     Io(io::Error),
     InvalidAddress(String),
-    InvalidTimestamp,
     /// Remote address family does not match configured local family.
     AddressFamilyMismatch,
     /// Payload longer than the IP family's length field can carry, or than the
@@ -129,7 +128,6 @@ impl fmt::Display for PcapError {
         match self {
             PcapError::Io(e) => write!(f, "pcap io error: {e}"),
             PcapError::InvalidAddress(s) => write!(f, "invalid address: {s}"),
-            PcapError::InvalidTimestamp => f.write_str("invalid timestamp"),
             PcapError::AddressFamilyMismatch => {
                 f.write_str("address family mismatch between remote and configured local")
             }
@@ -171,7 +169,9 @@ struct ConnectionState {
 pub struct PcapWriter<W: Write> {
     writer: W,
     config: PcapConfig,
-    connections: HashMap<(Transport, String), ConnectionState>,
+    /// Keyed by peer endpoint, so both directions of one connection share
+    /// the same sequence state.
+    connections: HashMap<(Transport, SocketAddr), ConnectionState>,
 }
 
 impl<W: Write> PcapWriter<W> {
@@ -312,8 +312,11 @@ impl<W: Write> PcapWriter<W> {
                 )
             }
             Transport::Tcp | Transport::Tls | Transport::Wss => {
-                let key = (meta.transport, format_remote_key(src, dst, direction));
-                let conn = self.connections.entry(key).or_default();
+                let peer = match direction {
+                    Direction::Sent => dst,
+                    Direction::Recv => src,
+                };
+                let conn = self.connections.entry((meta.transport, peer)).or_default();
                 let (seq, ack) = match direction {
                     Direction::Sent => (conn.sent_seq, conn.recv_seq),
                     Direction::Recv => (conn.recv_seq, conn.sent_seq),
@@ -514,17 +517,6 @@ fn transport_checksum(ips: IpPair, protocol: u8, segment: &[u8], segment_len: u1
     }
     buf.extend_from_slice(segment);
     checksum_ones_complement(&buf)
-}
-
-/// Connection key uses the unordered (FreeSWITCH-side, peer-side) pair so the
-/// same `(transport, peer_addr)` maps to the same TCP state regardless of
-/// direction.
-fn format_remote_key(src: SocketAddr, dst: SocketAddr, direction: Direction) -> String {
-    let peer = match direction {
-        Direction::Sent => dst,
-        Direction::Recv => src,
-    };
-    peer.to_string()
 }
 
 fn timestamp_to_unix(ts: Timestamp, date_base: Option<(u16, u8, u8)>) -> (u32, u32) {
