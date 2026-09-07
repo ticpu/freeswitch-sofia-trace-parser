@@ -276,6 +276,19 @@ enum HeaderParse {
     Invalid(ParseError),
 }
 
+enum SyncStep {
+    Ready,
+    End,
+    Failed(ParseError),
+}
+
+enum HeaderStep {
+    Got(FrameHeader),
+    Restart,
+    End,
+    Failed(ParseError),
+}
+
 /// Distinguish a header still arriving from one the parser rejects.
 fn classify_header(data: &[u8]) -> HeaderParse {
     match parse_frame_header(data) {
@@ -488,60 +501,41 @@ impl<R: Read> FrameIterator<R> {
             search_from = abs_pos + 2;
         }
     }
-}
 
-impl<R: Read> Iterator for FrameIterator<R> {
-    type Item = Result<Frame, ParseError>;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        // Ensure we have data
-        if self.buf.is_empty() && !self.eof {
-            if let Err(e) = self.fill_buf() {
-                return Some(Err(ParseError::Io(e)));
-            }
-        }
-
-        if self.buf.is_empty() {
-            return None;
-        }
-
-        // On first call, skip to first valid header if needed
-        if self.frame_count == 0 {
-            loop {
-                match self.skip_to_first_header() {
-                    Some(offset) => {
-                        if offset > 0 {
-                            let reason = if offset <= MAX_PARTIAL_FRAME {
-                                SkipReason::PartialFirstFrame
-                            } else {
-                                SkipReason::OversizedFrame
-                            };
-                            self.consume_skipped(offset, reason);
-                        }
-                        break;
+    /// Drop a partial first frame so the buffer starts at a frame header.
+    fn sync_to_first_header(&mut self) -> SyncStep {
+        loop {
+            match self.skip_to_first_header() {
+                Some(offset) => {
+                    if offset > 0 {
+                        let reason = if offset <= MAX_PARTIAL_FRAME {
+                            SkipReason::PartialFirstFrame
+                        } else {
+                            SkipReason::OversizedFrame
+                        };
+                        self.consume_skipped(offset, reason);
                     }
-                    None => {
-                        if self.eof {
-                            debug!("no valid frame header found in entire input");
-                            let remaining = self.buf.len();
-                            if remaining > 0 {
-                                self.consume_skipped(remaining, SkipReason::InvalidHeader);
-                            }
-                            return None;
+                    return SyncStep::Ready;
+                }
+                None => {
+                    if self.eof {
+                        debug!("no valid frame header found in entire input");
+                        let remaining = self.buf.len();
+                        if remaining > 0 {
+                            self.consume_skipped(remaining, SkipReason::InvalidHeader);
                         }
-                        if let Err(e) = self.fill_buf() {
-                            return Some(Err(ParseError::Io(e)));
-                        }
+                        return SyncStep::End;
+                    }
+                    if let Err(e) = self.fill_buf() {
+                        return SyncStep::Failed(ParseError::Io(e));
                     }
                 }
             }
         }
+    }
 
-        if self.buf.is_empty() {
-            return None;
-        }
-
-        // Strip inter-frame newline padding (\n or \r\n between frames)
+    /// Drop `\n` and `\r\n` padding between frames.
+    fn strip_padding(&mut self) {
         let mut strip = 0;
         while strip < self.buf.len() {
             if self.buf[strip] == b'\n' {
@@ -557,22 +551,14 @@ impl<R: Read> Iterator for FrameIterator<R> {
         }
         if strip > 0 {
             self.consume(strip);
-            if self.buf.is_empty() {
-                return self.next();
-            }
         }
+    }
 
-        // Parse frame header — may need more data if header spans buffer boundary
-        let FrameHeader {
-            direction,
-            byte_count,
-            transport,
-            address,
-            timestamp,
-            header_len,
-        } = loop {
+    /// Parse the header at the head of the buffer, reading more as it needs.
+    fn read_header(&mut self) -> HeaderStep {
+        loop {
             match classify_header(&self.buf) {
-                HeaderParse::Ok(h) => break h,
+                HeaderParse::Ok(h) => return HeaderStep::Got(h),
                 HeaderParse::NeedMore => {
                     if self.eof {
                         debug!("truncated frame header at EOF");
@@ -580,10 +566,10 @@ impl<R: Read> Iterator for FrameIterator<R> {
                         if remaining > 0 {
                             self.consume_skipped(remaining, SkipReason::InvalidHeader);
                         }
-                        return None;
+                        return HeaderStep::End;
                     }
                     if let Err(e) = self.fill_buf() {
-                        return Some(Err(ParseError::Io(e)));
+                        return HeaderStep::Failed(ParseError::Io(e));
                     }
                 }
                 HeaderParse::Invalid(e) => {
@@ -616,7 +602,7 @@ impl<R: Read> Iterator for FrameIterator<R> {
                             "skipped dump restart marker",
                         );
                         self.consume(skip);
-                        return self.next();
+                        return HeaderStep::Restart;
                     }
                     let skip = if let Some(b) = self.find_boundary(0) {
                         b + 2
@@ -625,27 +611,39 @@ impl<R: Read> Iterator for FrameIterator<R> {
                             .map(|p| p + 1)
                             .unwrap_or(self.buf.len())
                     };
-                    let reason =
-                        if self.buf.starts_with(RECV_PREFIX) || self.buf.starts_with(SENT_PREFIX) {
-                            SkipReason::InvalidHeader
-                        } else if skip > MAX_PARTIAL_FRAME {
-                            SkipReason::OversizedFrame
-                        } else if self.frame_count == 0 {
-                            SkipReason::PartialFirstFrame
-                        } else {
-                            let skipped = &self.buf[..skip];
-                            if self.is_replay(skipped) {
-                                SkipReason::ReplayedFrame
-                            } else {
-                                SkipReason::MidStreamSkip
-                            }
-                        };
+                    let reason = self.classify_skip(skip);
                     self.consume_skipped(skip, reason);
-                    return Some(Err(e));
+                    return HeaderStep::Failed(e);
                 }
             }
-        };
+        }
+    }
 
+    /// Reason for dropping `skip` bytes that failed header parsing.
+    fn classify_skip(&self, skip: usize) -> SkipReason {
+        if self.buf.starts_with(RECV_PREFIX) || self.buf.starts_with(SENT_PREFIX) {
+            SkipReason::InvalidHeader
+        } else if skip > MAX_PARTIAL_FRAME {
+            SkipReason::OversizedFrame
+        } else if self.frame_count == 0 {
+            SkipReason::PartialFirstFrame
+        } else if self.is_replay(&self.buf[..skip]) {
+            SkipReason::ReplayedFrame
+        } else {
+            SkipReason::MidStreamSkip
+        }
+    }
+
+    /// Read one frame's content, from the header's end to the frame boundary.
+    fn read_content(&mut self, header: FrameHeader) -> Option<Result<Frame, ParseError>> {
+        let FrameHeader {
+            direction,
+            byte_count,
+            transport,
+            address,
+            timestamp,
+            header_len,
+        } = header;
         let content_start = header_len;
         let expected_end = content_start + byte_count;
 
@@ -653,7 +651,7 @@ impl<R: Read> Iterator for FrameIterator<R> {
         // Strategy: first check at the expected position (content_start + byte_count),
         // then fall back to scanning. This handles file concatenation where \x0B\n
         // is followed by garbage from the next file's truncated first frame.
-        loop {
+        let content = loop {
             // Ensure we have enough data to check the expected position, but
             // never buffer a declared count further than a frame can reach:
             // past that, boundary scanning takes over.
@@ -679,14 +677,7 @@ impl<R: Read> Iterator for FrameIterator<R> {
                     };
                     self.consume(drain_to);
                     self.frame_count += 1;
-                    return Some(Ok(Frame {
-                        direction,
-                        byte_count,
-                        transport,
-                        address,
-                        timestamp,
-                        content,
-                    }));
+                    break content;
                 }
             }
 
@@ -706,14 +697,7 @@ impl<R: Read> Iterator for FrameIterator<R> {
                     );
                 }
 
-                return Some(Ok(Frame {
-                    direction,
-                    byte_count,
-                    transport,
-                    address,
-                    timestamp,
-                    content,
-                }));
+                break content;
             }
 
             if self.eof {
@@ -754,20 +738,61 @@ impl<R: Read> Iterator for FrameIterator<R> {
                     );
                 }
 
-                return Some(Ok(Frame {
-                    direction,
-                    byte_count,
-                    transport,
-                    address,
-                    timestamp,
-                    content,
-                }));
+                break content;
             }
 
             if let Err(e) = self.fill_buf() {
                 return Some(Err(ParseError::Io(e)));
             }
-        }
+        };
+
+        Some(Ok(Frame {
+            direction,
+            byte_count,
+            transport,
+            address,
+            timestamp,
+            content,
+        }))
+    }
+}
+
+impl<R: Read> Iterator for FrameIterator<R> {
+    type Item = Result<Frame, ParseError>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let header = loop {
+            if self.buf.is_empty() && !self.eof {
+                if let Err(e) = self.fill_buf() {
+                    return Some(Err(ParseError::Io(e)));
+                }
+            }
+            if self.buf.is_empty() {
+                return None;
+            }
+
+            if self.frame_count == 0 {
+                match self.sync_to_first_header() {
+                    SyncStep::Ready => {}
+                    SyncStep::End => return None,
+                    SyncStep::Failed(e) => return Some(Err(e)),
+                }
+            }
+
+            self.strip_padding();
+            if self.buf.is_empty() {
+                continue;
+            }
+
+            match self.read_header() {
+                HeaderStep::Got(header) => break header,
+                HeaderStep::Restart => continue,
+                HeaderStep::End => return None,
+                HeaderStep::Failed(e) => return Some(Err(e)),
+            }
+        };
+
+        self.read_content(header)
     }
 }
 
