@@ -219,6 +219,104 @@ impl Timestamp {
     }
 }
 
+/// Howard Hinnant's `days_from_civil` — proleptic Gregorian days since
+/// 1970-01-01. Pure integer math, valid for the entire i64 range.
+pub(crate) fn days_from_civil(y: i64, m: u32, d: u32) -> i64 {
+    let y = if m <= 2 { y - 1 } else { y };
+    let era = if y >= 0 { y } else { y - 399 } / 400;
+    let yoe = (y - era * 400) as u64;
+    let m_adj = if m > 2 { m as i64 - 3 } else { m as i64 + 9 } as u64;
+    let doy = (153 * m_adj + 2) / 5 + d as u64 - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    era * 146097 + doe as i64 - 719468
+}
+
+/// Elapsed time over a dump stream, for parsers that drop state a connection
+/// or dialog has stopped feeding.
+///
+/// A dated timestamp gives absolute seconds from its own date. A time-only
+/// timestamp has no date, so it gets a synthetic day counter that increments
+/// when the clock wraps past midnight. The two carry no common epoch: a stream
+/// that changes format resets the clock, and the sweep that would follow that
+/// reset is skipped, since every recorded time then belongs to the other
+/// domain.
+#[derive(Debug, Default, Clone)]
+pub struct StaleClock {
+    day: u32,
+    last_time_secs: u32,
+    now: u64,
+    last_sweep: u64,
+    dated: Option<bool>,
+    reset: bool,
+}
+
+impl StaleClock {
+    /// How long a connection or dialog may stay silent before its pending
+    /// state is dropped: the RFC 793 default TCP keepalive timeout, beyond
+    /// which a VoIP connection is dead.
+    pub const TIMEOUT_SECS: u64 = 7200;
+
+    /// A clock that has seen no timestamp yet.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Record a timestamp and return the stream time it reads, in seconds.
+    pub fn observe(&mut self, timestamp: Timestamp) -> u64 {
+        let dated = matches!(timestamp, Timestamp::DateTime { .. });
+        if self.dated != Some(dated) {
+            self.dated = Some(dated);
+            self.day = 0;
+            self.last_time_secs = 0;
+            self.reset = true;
+        }
+
+        let time_secs = timestamp.time_of_day_secs();
+        self.now = match timestamp {
+            Timestamp::DateTime {
+                year, month, day, ..
+            } => {
+                let days = days_from_civil(year as i64, month as u32, day as u32).max(0) as u64;
+                days * 86400 + time_secs as u64
+            }
+            Timestamp::TimeOnly { .. } => {
+                if time_secs < self.last_time_secs && self.last_time_secs - time_secs > 43200 {
+                    self.day += 1;
+                }
+                self.day as u64 * 86400 + time_secs as u64
+            }
+        };
+        self.last_time_secs = time_secs;
+        self.now
+    }
+
+    /// The stream time of the last observed timestamp, in seconds.
+    pub fn now(&self) -> u64 {
+        self.now
+    }
+
+    /// Whether a stale sweep is due, marking one as taken when it is. The
+    /// first sweep after a format change is not due: no recorded time is
+    /// comparable to the clock's new domain.
+    pub fn sweep_due(&mut self) -> bool {
+        if self.reset {
+            self.reset = false;
+            self.last_sweep = self.now;
+            return false;
+        }
+        if self.now.saturating_sub(self.last_sweep) >= Self::TIMEOUT_SECS {
+            self.last_sweep = self.now;
+            return true;
+        }
+        false
+    }
+
+    /// Whether a time recorded from [`now`](Self::now) has gone stale.
+    pub fn is_stale(&self, last_seen: u64) -> bool {
+        self.now.saturating_sub(last_seen) > Self::TIMEOUT_SECS
+    }
+}
+
 impl fmt::Display for Timestamp {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {

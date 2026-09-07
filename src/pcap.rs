@@ -37,7 +37,9 @@ use std::io::{self, Write};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::str::FromStr;
 
-use crate::types::{Direction, Frame, ParsedSipMessage, SipMessage, Timestamp, Transport};
+use crate::types::{
+    days_from_civil, Direction, Frame, ParsedSipMessage, SipMessage, Timestamp, Transport,
+};
 
 const PCAP_MAGIC_USEC: u32 = 0xa1b2c3d4;
 const PCAP_VERSION_MAJOR: u16 = 2;
@@ -509,18 +511,6 @@ fn timestamp_to_unix(ts: Timestamp, date_base: Option<(u16, u8, u8)>) -> (u32, u
     let secs = days * 86400 + h as i64 * 3600 + m as i64 * 60 + s as i64;
     let secs = if secs < 0 { 0 } else { secs as u32 };
     (secs, us)
-}
-
-/// Howard Hinnant's `days_from_civil` — proleptic Gregorian days since
-/// 1970-01-01. Pure integer math, valid for the entire i64 range.
-fn days_from_civil(y: i64, m: u32, d: u32) -> i64 {
-    let y = if m <= 2 { y - 1 } else { y };
-    let era = if y >= 0 { y } else { y - 399 } / 400;
-    let yoe = (y - era * 400) as u64;
-    let m_adj = if m > 2 { m as i64 - 3 } else { m as i64 + 9 } as u64;
-    let doy = (153 * m_adj + 2) / 5 + d as u64 - 1;
-    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
-    era * 146097 + doe as i64 - 719468
 }
 
 #[cfg(all(test, feature = "pcap"))]

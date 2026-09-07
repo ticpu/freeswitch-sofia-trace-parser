@@ -7,18 +7,13 @@ use tracing::{debug, trace, warn};
 use crate::frame::{FrameIterator, ParseError};
 use crate::sip::{sip_start, SipStart};
 use crate::types::{
-    Direction, ParseStats, SipMessage, SkipTracking, Timestamp, Transport, UnparsedRegion,
+    Direction, ParseStats, SipMessage, SkipTracking, StaleClock, Timestamp, Transport,
+    UnparsedRegion,
 };
 
 static CRLF: LazyLock<memmem::Finder<'static>> = LazyLock::new(|| memmem::Finder::new(b"\r\n"));
 static CRLFCRLF: LazyLock<memmem::Finder<'static>> =
     LazyLock::new(|| memmem::Finder::new(b"\r\n\r\n"));
-
-/// RFC 793 default TCP keepalive timeout.
-/// Connection buffers inactive for longer than this are considered stale
-/// and evicted to prevent unbounded memory growth when processing
-/// multi-day dump file streams with ephemeral TLS source ports.
-const STALE_TIMEOUT_SECS: u64 = 7200;
 
 /// Level 2 streaming parser: reassembles TCP segments into complete SIP messages.
 ///
@@ -47,9 +42,7 @@ pub struct MessageIterator<R> {
     buffers: HashMap<(Direction, String), ConnectionBuffer>,
     ready: VecDeque<SipMessage>,
     exhausted: bool,
-    current_day: u32,
-    last_time_secs: u32,
-    last_sweep_abs_secs: u64,
+    clock: StaleClock,
 }
 
 struct ConnectionBuffer {
@@ -57,8 +50,7 @@ struct ConnectionBuffer {
     timestamp: Timestamp,
     content: Vec<u8>,
     frame_count: usize,
-    last_seen_day: u32,
-    last_seen_time_secs: u32,
+    last_seen: u64,
 }
 
 impl<R: std::io::Read> MessageIterator<R> {
@@ -69,9 +61,7 @@ impl<R: std::io::Read> MessageIterator<R> {
             buffers: HashMap::new(),
             ready: VecDeque::new(),
             exhausted: false,
-            current_day: 0,
-            last_time_secs: 0,
-            last_sweep_abs_secs: 0,
+            clock: StaleClock::new(),
         }
     }
 
@@ -102,29 +92,11 @@ impl<R: std::io::Read> MessageIterator<R> {
         self.frames.drain_unparsed()
     }
 
-    fn update_time_tracking(&mut self, time_secs: u32) {
-        if time_secs < self.last_time_secs && self.last_time_secs - time_secs > 43200 {
-            self.current_day += 1;
-            debug!(
-                day = self.current_day,
-                prev_secs = self.last_time_secs,
-                curr_secs = time_secs,
-                "detected day rollover"
-            );
-        }
-        self.last_time_secs = time_secs;
-    }
-
-    fn current_abs_secs(&self) -> u64 {
-        self.current_day as u64 * 86400 + self.last_time_secs as u64
-    }
-
     fn sweep_stale_buffers(&mut self) {
-        let current_abs = self.current_abs_secs();
+        let clock = &self.clock;
         self.buffers.retain(|key, buf| {
-            let buf_abs = buf.last_seen_day as u64 * 86400 + buf.last_seen_time_secs as u64;
-            let elapsed = current_abs.saturating_sub(buf_abs);
-            if elapsed > STALE_TIMEOUT_SECS {
+            let elapsed = clock.now().saturating_sub(buf.last_seen);
+            if clock.is_stale(buf.last_seen) {
                 if buf.content.is_empty() {
                     trace!(
                         address = %key.1,
@@ -198,13 +170,9 @@ impl<R: std::io::Read> Iterator for MessageIterator<R> {
                         }));
                     }
 
-                    let time_secs = frame.timestamp.time_of_day_secs();
-                    self.update_time_tracking(time_secs);
-
-                    let current_abs = self.current_abs_secs();
-                    if current_abs.saturating_sub(self.last_sweep_abs_secs) >= STALE_TIMEOUT_SECS {
+                    let now = self.clock.observe(frame.timestamp);
+                    if self.clock.sweep_due() {
                         self.sweep_stale_buffers();
-                        self.last_sweep_abs_secs = current_abs;
                     }
 
                     let key = (frame.direction, frame.address);
@@ -216,13 +184,11 @@ impl<R: std::io::Read> Iterator for MessageIterator<R> {
                             timestamp: frame.timestamp,
                             content: Vec::new(),
                             frame_count: 0,
-                            last_seen_day: self.current_day,
-                            last_seen_time_secs: time_secs,
+                            last_seen: now,
                         }),
                     };
 
-                    buf.last_seen_day = self.current_day;
-                    buf.last_seen_time_secs = time_secs;
+                    buf.last_seen = now;
 
                     if buf.content.is_empty() {
                         buf.timestamp = frame.timestamp;
@@ -859,8 +825,7 @@ mod tests {
             },
             content,
             frame_count: 1,
-            last_seen_day: 0,
-            last_seen_time_secs: 0,
+            last_seen: 0,
         };
         let msgs = extract_complete(&mut buf, &key);
         assert_eq!(msgs.len(), 2);
@@ -887,8 +852,7 @@ mod tests {
             },
             content,
             frame_count: 1,
-            last_seen_day: 0,
-            last_seen_time_secs: 0,
+            last_seen: 0,
         };
         let msgs = extract_complete(&mut buf, &key);
         assert_eq!(msgs.len(), 1);
@@ -928,8 +892,7 @@ mod tests {
             },
             content,
             frame_count: 1,
-            last_seen_day: 0,
-            last_seen_time_secs: 0,
+            last_seen: 0,
         };
         let msgs = extract_complete(&mut buf, &key);
         assert!(msgs.is_empty());
@@ -955,8 +918,7 @@ mod tests {
             },
             content,
             frame_count: 1,
-            last_seen_day: 0,
-            last_seen_time_secs: 0,
+            last_seen: 0,
         };
         let msgs = extract_complete(&mut buf, &key);
         assert!(msgs.is_empty(), "should wait for body to complete");
@@ -979,8 +941,7 @@ mod tests {
             },
             content,
             frame_count: 1,
-            last_seen_day: 0,
-            last_seen_time_secs: 0,
+            last_seen: 0,
         };
         let msgs = extract_complete(&mut buf, &key);
         assert!(msgs.is_empty(), "should wait for headers to complete");
@@ -1364,7 +1325,11 @@ mod tests {
 
         assert_eq!(msgs.len(), 1);
         assert_eq!(msgs[0].address, "[::1]:5060");
-        assert_eq!(iter.current_day, 1, "should have detected one day rollover");
+        assert_eq!(
+            iter.clock.now(),
+            86400 + 2 * 3600 + 1,
+            "should have detected one day rollover"
+        );
         assert!(
             iter.buffers.is_empty(),
             "stale buffer should have been evicted after day rollover"
