@@ -1276,6 +1276,67 @@ mod tests {
     }
 
     #[test]
+    fn stale_buffer_evicted_across_dates() {
+        let sip = b"OPTIONS sip:host SIP/2.0\r\nContent-Length: 0\r\n\r\n";
+        let partial = b"INVITE sip:host SIP/2.0\r\n";
+
+        let mut data = make_frame_at(
+            Direction::Recv,
+            Transport::Tls,
+            "[::99]:44444",
+            partial,
+            "2026-02-16 10:00:00.000000",
+        );
+        data.extend_from_slice(&make_frame_at(
+            Direction::Recv,
+            Transport::Tls,
+            "[::1]:5060",
+            sip,
+            "2026-02-19 10:00:01.000000",
+        ));
+
+        let mut iter = MessageIterator::new(&data[..]);
+        let msgs: Vec<SipMessage> = iter.by_ref().collect::<Result<Vec<_>, _>>().unwrap();
+
+        assert_eq!(msgs.len(), 1, "the three-day-old buffer must be evicted");
+        assert_eq!(msgs[0].address, "[::1]:5060");
+        assert!(iter.buffers.is_empty());
+    }
+
+    #[test]
+    fn timestamp_format_change_evicts_nothing() {
+        let sip = b"OPTIONS sip:host SIP/2.0\r\nContent-Length: 0\r\n\r\n";
+        let partial = b"INVITE sip:host SIP/2.0\r\n";
+
+        let mut data = make_frame_at(
+            Direction::Recv,
+            Transport::Tls,
+            "[::99]:44444",
+            partial,
+            "10:00:00.000000",
+        );
+        data.extend_from_slice(&make_frame_at(
+            Direction::Recv,
+            Transport::Tls,
+            "[::1]:5060",
+            sip,
+            "2026-02-16 12:00:01.000000",
+        ));
+
+        let msgs: Vec<SipMessage> = MessageIterator::new(&data[..])
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+
+        assert_eq!(
+            msgs.len(),
+            2,
+            "the two timestamp formats share no epoch, so nothing is stale"
+        );
+        assert_eq!(msgs[1].address, "[::99]:44444");
+        assert_eq!(msgs[1].content, partial);
+    }
+
+    #[test]
     fn day_rollover_detection_with_time_only() {
         let sip = b"OPTIONS sip:host SIP/2.0\r\nContent-Length: 0\r\n\r\n";
         let partial = b"INVITE sip:host SIP/2.0\r\n";
