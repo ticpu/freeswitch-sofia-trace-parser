@@ -1655,6 +1655,12 @@ mod tests {
     }
 
     #[test]
+    fn method_with_backtick_is_a_token() {
+        let msg = make_sip_message(b"X-P`ING sip:host SIP/2.0\r\nCSeq: 1 X-P`ING\r\n\r\n");
+        assert_eq!(msg.parse().unwrap().method(), Some("X-P`ING"));
+    }
+
+    #[test]
     fn extract_boundary_only_from_its_own_parameter() {
         assert_eq!(
             extract_boundary("multipart/mixed; x-boundary=decoy; boundary=real"),
