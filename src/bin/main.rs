@@ -152,6 +152,19 @@ struct CompiledFilters {
 }
 
 impl CompiledFilters {
+    /// Whether the run asked for any SIP-level filtering. The default OPTIONS
+    /// exclusion is not a request, so it does not count.
+    fn is_empty(&self) -> bool {
+        self.methods.is_empty()
+            && self.excludes.is_empty()
+            && self.call_id.is_none()
+            && self.direction.is_none()
+            && self.address.is_none()
+            && self.headers.is_empty()
+            && self.body_grep.is_none()
+            && self.grep.is_none()
+    }
+
     fn excludes_method(&self, method: &str) -> bool {
         if self.exclude_options && method.eq_ignore_ascii_case("OPTIONS") {
             return true;
@@ -778,10 +791,39 @@ fn print_unparsed(stats: &ParseStats) {
     }
 }
 
-fn main() {
-    let cli = Cli::parse();
-    init_tracing(cli.verbose);
+/// What the run does, with whatever it needs settled before any input is
+/// opened. Only the variants that filter compile a regex.
+enum Action {
+    PcapLayer3,
+    PcapLayer4(CompiledFilters),
+    Frames,
+    Raw,
+    Dialog(OutputMode, CompiledFilters),
+    Stats(CompiledFilters),
+    Filtered(OutputMode, CompiledFilters),
+}
 
+fn resolve_action(cli: &Cli) -> Action {
+    if cli.pcap_export {
+        if cli.pcap_layer == Some(PcapLayerArg::Network) {
+            Action::PcapLayer3
+        } else {
+            Action::PcapLayer4(compile_filters(cli))
+        }
+    } else if cli.frames {
+        Action::Frames
+    } else if cli.raw {
+        Action::Raw
+    } else if cli.dialog {
+        Action::Dialog(output_mode(cli), compile_filters(cli))
+    } else if cli.stats {
+        Action::Stats(compile_filters(cli))
+    } else {
+        Action::Filtered(output_mode(cli), compile_filters(cli))
+    }
+}
+
+fn validate(cli: &Cli) {
     if cli.dialog && (cli.raw || cli.frames) {
         eprintln!("--dialog is incompatible with --raw and --frames");
         process::exit(2);
@@ -792,60 +834,32 @@ fn main() {
         process::exit(2);
     }
 
-    let layer3_filter_set = !cli.method.is_empty()
-        || !cli.exclude.is_empty()
-        || cli.call_id.is_some()
-        || cli.direction.is_some()
-        || cli.address.is_some()
-        || !cli.header.is_empty()
-        || cli.body_grep.is_some()
-        || cli.grep.is_some()
-        || cli.dialog;
-    if cli.pcap_export && cli.pcap_layer == Some(PcapLayerArg::Network) && layer3_filter_set {
+    if cli.pcap_export
+        && cli.pcap_layer == Some(PcapLayerArg::Network)
+        && (cli.dialog || !compile_filters(cli).is_empty())
+    {
         eprintln!("--pcap-layer 3 emits raw frames; SIP-level filters are not applicable");
         process::exit(2);
     }
+}
+
+fn main() {
+    let cli = Cli::parse();
+    init_tracing(cli.verbose);
+    validate(&cli);
 
     let capture = cli.unparsed;
+    let action = resolve_action(&cli);
+    let input = open_input(&cli.files, !cli.no_grep_filter);
 
-    let stats = if cli.pcap_export && cli.pcap_layer == Some(PcapLayerArg::Network) {
-        pcap::run_layer3(open_input(&cli.files, !cli.no_grep_filter), capture)
-    } else if cli.pcap_export {
-        let filters = compile_filters(&cli);
-        pcap::run_layer4(
-            open_input(&cli.files, !cli.no_grep_filter),
-            &filters,
-            capture,
-        )
-    } else if cli.frames {
-        run_frames(open_input(&cli.files, !cli.no_grep_filter), capture)
-    } else if cli.raw {
-        run_raw(open_input(&cli.files, !cli.no_grep_filter), capture)
-    } else {
-        let filters = compile_filters(&cli);
-        let mode = output_mode(&cli);
-
-        if cli.dialog {
-            run_dialog(
-                open_input(&cli.files, !cli.no_grep_filter),
-                &mode,
-                &filters,
-                capture,
-            )
-        } else if cli.stats {
-            run_stats(
-                open_input(&cli.files, !cli.no_grep_filter),
-                &filters,
-                capture,
-            )
-        } else {
-            run_filtered(
-                open_input(&cli.files, !cli.no_grep_filter),
-                &mode,
-                &filters,
-                capture,
-            )
-        }
+    let stats = match &action {
+        Action::PcapLayer3 => pcap::run_layer3(input, capture),
+        Action::PcapLayer4(filters) => pcap::run_layer4(input, filters, capture),
+        Action::Frames => run_frames(input, capture),
+        Action::Raw => run_raw(input, capture),
+        Action::Dialog(mode, filters) => run_dialog(input, mode, filters, capture),
+        Action::Stats(filters) => run_stats(input, filters, capture),
+        Action::Filtered(mode, filters) => run_filtered(input, mode, filters, capture),
     };
 
     if cli.unparsed {
