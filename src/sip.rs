@@ -284,7 +284,7 @@ fn parse_status_line(line: &[u8]) -> Result<StartLineRef<'_>, ParseError> {
 fn is_sip_token(b: &[u8]) -> bool {
     !b.is_empty()
         && b.iter()
-            .all(|&c| c.is_ascii_alphanumeric() || b"-._!%*+'~".contains(&c))
+            .all(|&c| c.is_ascii_alphanumeric() || b"-._!%*+`'~".contains(&c))
 }
 
 /// A syntactically valid header first line: a nonempty SIP token, optionally
