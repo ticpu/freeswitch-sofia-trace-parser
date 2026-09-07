@@ -467,10 +467,11 @@ falls between the halves. Level 2 keeps framing on CRLF pairs and
 Content-Length; on a malformed blank line the levels disagree by design,
 each still accounting for every byte.
 
-Level 2 finds a message start with the Level 3 start-line grammar, not a
-method table, so any request Level 3 would parse is resynchronised on; a
-start line cut short by a frame boundary waits for more bytes rather than
-being scanned past.
+One start-line grammar serves both levels, and it sits below them rather
+than inside Level 3, so Level 2 resynchronises on any request Level 3 would
+parse without depending on it. A start line cut short by a frame boundary
+waits for more bytes rather than being scanned past. The shared data types
+sit under every level and reach up into none.
 
 ### GrepFilter Zero-Copy Path
 

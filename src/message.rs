@@ -4,7 +4,7 @@ use tracing::{debug, trace, warn};
 
 use crate::finders::{CRLF, CRLFCRLF};
 use crate::frame::{FrameIterator, ParseError};
-use crate::sip::{sip_start, SipStart};
+use crate::startline::{sip_start, SipStart};
 use crate::types::{
     Direction, ParseStats, SipMessage, SkipTracking, StaleClock, Timestamp, Transport,
     UnparsedRegion,

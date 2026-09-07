@@ -1,35 +1,6 @@
 use std::borrow::Cow;
 
-use sip_header::SipHeader;
-
-use crate::types::Headers;
-
-/// Canonical name of an RFC 3261 §7.3.3 compact form, `None` for any other
-/// header name.
-fn expand_compact(name: &str) -> Option<&'static str> {
-    let [ch] = name.as_bytes() else {
-        return None;
-    };
-    SipHeader::from_compact(*ch).map(|header| header.as_str())
-}
-
-/// Value recorded under `name` or under the compact form that expands to it,
-/// preferring the full name wherever the message carries both.
-pub(crate) fn value_or_compact<'a>(headers: &'a Headers, name: &str) -> Option<&'a str> {
-    let mut compact = None;
-    for (key, value) in headers.iter() {
-        if key.eq_ignore_ascii_case(name) {
-            return Some(value);
-        }
-        if compact.is_none()
-            && key.len() == 1
-            && expand_compact(key).is_some_and(|full| full.eq_ignore_ascii_case(name))
-        {
-            compact = Some(value.as_str());
-        }
-    }
-    compact
-}
+use crate::types::expand_compact;
 
 /// Strip parameters from a Content-Type value and normalize to lowercase.
 /// Borrows when the type/subtype is already lowercase and unpadded.

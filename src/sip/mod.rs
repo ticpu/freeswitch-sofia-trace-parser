@@ -5,26 +5,24 @@ use sip_header::extract_all_headers;
 use crate::finders::CRLF;
 use crate::frame::ParseError;
 use crate::message::MessageIterator;
-use crate::sip::content_type::{extract_boundary, normalize_media_type, value_or_compact};
+use crate::sip::content_type::{extract_boundary, normalize_media_type};
 use crate::sip::json::unescape_json_body;
 use crate::sip::multipart::{is_multipart_type, split_multipart};
-use crate::sip::startline::{bytes_to_str, parse_first_line, parse_first_line_ref, StartLineRef};
+use crate::startline::{bytes_to_str, parse_first_line, parse_first_line_ref, StartLineRef};
 use crate::types::{
-    Headers, MimePart, ParseStats, ParsedSipMessage, SipFragment, SipMessage, SkipTracking,
-    UnparsedRegion,
+    value_or_compact, Headers, MimePart, ParseStats, ParsedSipMessage, SipFragment, SipMessage,
+    SkipTracking, UnparsedRegion,
 };
 
 pub(crate) mod content_type;
 mod fragment;
 mod json;
 mod multipart;
-pub(crate) mod startline;
 #[cfg(test)]
-mod test_support;
+pub(crate) mod test_support;
 
 pub use content_type::is_json_content_type;
 pub use fragment::parse_sipfrag;
-pub(crate) use startline::{sip_start, SipStart};
 
 /// Everything a SIP header block plus a body answers, written once. The three
 /// carriers each expose these as inherent methods that delegate here, so a
@@ -33,10 +31,6 @@ pub(crate) trait HasHeaders {
     fn headers(&self) -> &Headers;
 
     fn body(&self) -> &[u8];
-
-    fn header_value(&self, name: &str) -> Option<&str> {
-        self.headers().value(name)
-    }
 
     fn content_type(&self) -> Option<&str> {
         value_or_compact(self.headers(), "Content-Type")

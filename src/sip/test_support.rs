@@ -1,6 +1,6 @@
 use crate::types::{Direction, ParsedSipMessage, SipMessage, Timestamp, Transport};
 
-pub(super) fn make_sip_message(content: &[u8]) -> SipMessage {
+pub(crate) fn make_sip_message(content: &[u8]) -> SipMessage {
     SipMessage {
         direction: Direction::Recv,
         transport: Transport::Udp,
@@ -16,7 +16,7 @@ pub(super) fn make_sip_message(content: &[u8]) -> SipMessage {
     }
 }
 
-pub(super) fn make_multipart_invite(boundary: &str, parts: &[(&str, &[u8])]) -> SipMessage {
+pub(crate) fn make_multipart_invite(boundary: &str, parts: &[(&str, &[u8])]) -> SipMessage {
     let mut body = Vec::new();
     for (ct, content) in parts {
         body.extend_from_slice(format!("--{boundary}\r\n").as_bytes());

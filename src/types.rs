@@ -2,8 +2,32 @@ use std::borrow::Cow;
 use std::fmt;
 use std::net::SocketAddr;
 
-use crate::sip::content_type::value_or_compact;
-use crate::sip::HasHeaders;
+/// Canonical name of an RFC 3261 §7.3.3 compact form, `None` for any other
+/// header name.
+pub(crate) fn expand_compact(name: &str) -> Option<&'static str> {
+    let [ch] = name.as_bytes() else {
+        return None;
+    };
+    sip_header::SipHeader::from_compact(*ch).map(|header| header.as_str())
+}
+
+/// Value recorded under `name` or under the compact form that expands to it,
+/// preferring the full name wherever the message carries both.
+pub(crate) fn value_or_compact<'a>(headers: &'a Headers, name: &str) -> Option<&'a str> {
+    let mut compact = None;
+    for (key, value) in headers.iter() {
+        if key.eq_ignore_ascii_case(name) {
+            return Some(value);
+        }
+        if compact.is_none()
+            && key.len() == 1
+            && expand_compact(key).is_some_and(|full| full.eq_ignore_ascii_case(name))
+        {
+            compact = Some(value.as_str());
+        }
+    }
+    compact
+}
 
 /// mod_sofia brackets IPv4 like IPv6 (`[198.51.100.7]:5060`); anything that
 /// isn't an ip:port shape yields `None` rather than a guess.
@@ -675,13 +699,13 @@ pub struct SipFragment {
 impl SipFragment {
     /// Case-insensitive header lookup, first match in wire order.
     pub fn header_value(&self, name: &str) -> Option<&str> {
-        HasHeaders::header_value(self, name)
+        self.headers.value(name)
     }
 
     /// Returns the Content-Type header value. Checks both `Content-Type` and
     /// the compact form `c`.
     pub fn content_type(&self) -> Option<&str> {
-        HasHeaders::content_type(self)
+        value_or_compact(&self.headers, "Content-Type")
     }
 }
 
@@ -698,12 +722,12 @@ impl MimePart {
     /// Returns the Content-Type header value. Checks both `Content-Type` and
     /// the compact form `c`.
     pub fn content_type(&self) -> Option<&str> {
-        HasHeaders::content_type(self)
+        value_or_compact(&self.headers, "Content-Type")
     }
 
     /// Case-insensitive header lookup, first match in wire order.
     pub fn header_value(&self, name: &str) -> Option<&str> {
-        HasHeaders::header_value(self, name)
+        self.headers.value(name)
     }
 
     /// Returns the Content-ID header value, if present.
@@ -751,7 +775,7 @@ impl ParsedSipMessage {
     /// Returns the Content-Type header value. Checks both `Content-Type` and
     /// the compact form `c`.
     pub fn content_type(&self) -> Option<&str> {
-        HasHeaders::content_type(self)
+        value_or_compact(&self.headers, "Content-Type")
     }
 
     /// Returns the Content-Length header value as `usize`. Checks both
@@ -804,7 +828,7 @@ impl ParsedSipMessage {
     /// Case-insensitive header lookup, first match in wire order. Compact
     /// forms are not resolved; the typed accessors above check both names.
     pub fn header_value(&self, name: &str) -> Option<&str> {
-        HasHeaders::header_value(self, name)
+        self.headers.value(name)
     }
 }
 

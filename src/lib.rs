@@ -52,6 +52,7 @@
 )]
 
 mod finders;
+mod startline;
 
 /// Level 1: frame boundary detection and header parsing.
 pub mod frame;
