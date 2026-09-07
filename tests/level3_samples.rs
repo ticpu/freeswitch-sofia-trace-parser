@@ -1,35 +1,28 @@
-use std::collections::HashMap;
-use std::fs::File;
-use std::path::Path;
+mod common;
 
-use freeswitch_sofia_trace_parser::types::{
-    ParseStats, SipMessageType, SkipReason, SkipTracking, Transport,
-};
+use freeswitch_sofia_trace_parser::types::{ParseStats, SipMessageType, SkipTracking, Transport};
 use freeswitch_sofia_trace_parser::{MessageIterator, ParsedMessageIterator, ParsedSipMessage};
 
-fn sample_dir() -> &'static Path {
-    Path::new("samples")
-}
+use common::{
+    assert_parse_stats, method_histogram, open_sample, MIN_HEADER_PRESENCE, MIN_PARSE_SUCCESS,
+};
 
 struct ParseResult {
-    parsed: Vec<freeswitch_sofia_trace_parser::ParsedSipMessage>,
+    parsed: Vec<ParsedSipMessage>,
     errors: usize,
     total: usize,
     stats: ParseStats,
 }
 
 fn parse_file(name: &str) -> ParseResult {
-    let path = sample_dir().join(name);
-    if !path.exists() {
-        eprintln!("skipping {name}: file not found");
+    let Some(file) = open_sample(name) else {
         return ParseResult {
             parsed: vec![],
             errors: 0,
             total: 0,
             stats: ParseStats::default(),
         };
-    }
-    let file = File::open(&path).unwrap();
+    };
     let mut iter = ParsedMessageIterator::new(file).skip_tracking(SkipTracking::TrackRegions);
     let mut parsed = Vec::new();
     let mut errors = 0;
@@ -56,135 +49,103 @@ fn parse_file(name: &str) -> ParseResult {
     }
 }
 
-fn assert_parse_stats(stats: &ParseStats, name: &str, max_partial: usize) {
-    let partial_count = stats
-        .unparsed_regions
-        .iter()
-        .filter(|r| r.reason == SkipReason::PartialFirstFrame)
-        .count();
-    let invalid_count = stats
-        .unparsed_regions
-        .iter()
-        .filter(|r| r.reason == SkipReason::InvalidHeader)
-        .count();
-
-    eprintln!(
-        "{name}: bytes_read={}, bytes_skipped={}, regions={} (partial={partial_count}, invalid={invalid_count})",
-        stats.bytes_read,
-        stats.bytes_skipped,
-        stats.unparsed_regions.len(),
-    );
-
-    assert!(
-        partial_count <= max_partial,
-        "{name}: expected at most {max_partial} partial first frame(s), got {partial_count}"
-    );
-    assert_eq!(
-        invalid_count, 0,
-        "{name}: expected zero invalid header skips, got {invalid_count}"
-    );
-}
+const TCP_LIKE_FILES: &[&str] = &[
+    "esinet1-v4-tcp.dump.20",
+    "esinet1-v4-tcp.dump.4",
+    "esinet1-v6-tcp.dump.205",
+];
 
 #[test]
-fn tcp_all_messages_parse() {
-    let result = parse_file("esinet1-v4-tcp.dump.20");
-    if result.total == 0 {
-        return;
+fn tcp_like_messages_parse() {
+    for name in TCP_LIKE_FILES {
+        let result = parse_file(name);
+        if result.total == 0 {
+            continue;
+        }
+        assert_parse_stats(&result.stats, name, 1);
+        let msgs = &result.parsed;
+
+        eprintln!(
+            "{name}: {} parsed, {} errors out of {} total",
+            msgs.len(),
+            result.errors,
+            result.total
+        );
+
+        let requests = msgs
+            .iter()
+            .filter(|m| matches!(m.message_type, SipMessageType::Request { .. }))
+            .count();
+        let responses = msgs
+            .iter()
+            .filter(|m| matches!(m.message_type, SipMessageType::Response { .. }))
+            .count();
+        eprintln!("  requests: {requests}, responses: {responses}");
+
+        assert!(requests > 0, "{name}: should have requests");
+        assert!(responses > 0, "{name}: should have responses");
+
+        let success_rate = msgs.len() as f64 / result.total as f64;
+        assert!(
+            success_rate > MIN_PARSE_SUCCESS,
+            "{name}: parse success rate too low: {:.3}%",
+            success_rate * 100.0
+        );
+
+        assert!(!msgs.is_empty(), "{name}: no messages parsed");
+        let with_callid = msgs.iter().filter(|m| m.call_id().is_some()).count();
+        let ratio = with_callid as f64 / msgs.len() as f64;
+        eprintln!(
+            "  with Call-ID: {with_callid}/{} ({:.1}%)",
+            msgs.len(),
+            ratio * 100.0
+        );
+        assert!(
+            ratio > MIN_HEADER_PRESENCE,
+            "{name}: expected >{:.0}% of messages to have Call-ID, got {:.1}%",
+            MIN_HEADER_PRESENCE * 100.0,
+            ratio * 100.0
+        );
     }
-    assert_parse_stats(&result.stats, "esinet1-v4-tcp.dump.20", 1);
-    let msgs = &result.parsed;
-
-    eprintln!(
-        "esinet1-v4-tcp.dump.20: {} parsed, {} errors out of {} total",
-        msgs.len(),
-        result.errors,
-        result.total
-    );
-
-    let requests = msgs
-        .iter()
-        .filter(|m| matches!(m.message_type, SipMessageType::Request { .. }))
-        .count();
-    let responses = msgs
-        .iter()
-        .filter(|m| matches!(m.message_type, SipMessageType::Response { .. }))
-        .count();
-    eprintln!("  requests: {requests}, responses: {responses}");
-
-    assert!(requests > 0, "should have requests");
-    assert!(responses > 0, "should have responses");
-
-    // Parse success rate should be very high (>99.99%)
-    let success_rate = msgs.len() as f64 / result.total as f64;
-    assert!(
-        success_rate > 0.999,
-        "parse success rate too low: {:.3}%",
-        success_rate * 100.0
-    );
-
-    // All parsed messages should have a Call-ID
-    let with_callid = msgs.iter().filter(|m| m.call_id().is_some()).count();
-    let ratio = with_callid as f64 / msgs.len() as f64;
-    eprintln!(
-        "  with Call-ID: {with_callid}/{} ({:.1}%)",
-        msgs.len(),
-        ratio * 100.0
-    );
-    assert!(
-        ratio > 0.99,
-        "expected >99% of messages to have Call-ID, got {:.1}%",
-        ratio * 100.0
-    );
 }
 
+const UDP_LIKE_FILES: &[&str] = &["esinet1-v4-udp.dump.20", "esinet1-v6-udp.dump.205"];
+
 #[test]
-fn tcp_v4_dump_4_all_parse() {
-    let result = parse_file("esinet1-v4-tcp.dump.4");
-    if result.total == 0 {
-        return;
+fn udp_like_messages_parse() {
+    for name in UDP_LIKE_FILES {
+        let result = parse_file(name);
+        if result.total == 0 {
+            continue;
+        }
+        assert_parse_stats(&result.stats, name, 1);
+        let msgs = &result.parsed;
+
+        eprintln!("{name}: {} parsed messages", msgs.len());
+        assert!(!msgs.is_empty(), "{name}: no messages parsed");
+        assert!(
+            msgs.iter().all(|m| m.transport == Transport::Udp),
+            "{name}: expected all UDP messages"
+        );
+        assert_eq!(
+            result.errors, 0,
+            "{name}: UDP should have zero parse errors"
+        );
+
+        let with_callid = msgs.iter().filter(|m| m.call_id().is_some()).count();
+        let ratio = with_callid as f64 / msgs.len() as f64;
+        eprintln!(
+            "  with Call-ID: {with_callid}/{} ({:.1}%)",
+            msgs.len(),
+            ratio * 100.0
+        );
+        assert!(
+            ratio > MIN_HEADER_PRESENCE,
+            "{name}: expected >{:.0}% of messages to have Call-ID, got {:.1}%",
+            MIN_HEADER_PRESENCE * 100.0,
+            ratio * 100.0
+        );
     }
-    assert_parse_stats(&result.stats, "esinet1-v4-tcp.dump.4", 1);
-    let msgs = &result.parsed;
-
-    eprintln!(
-        "esinet1-v4-tcp.dump.4: {} parsed, {} errors out of {} total",
-        msgs.len(),
-        result.errors,
-        result.total
-    );
-
-    let requests = msgs
-        .iter()
-        .filter(|m| matches!(m.message_type, SipMessageType::Request { .. }))
-        .count();
-    let responses = msgs
-        .iter()
-        .filter(|m| matches!(m.message_type, SipMessageType::Response { .. }))
-        .count();
-    eprintln!("  requests: {requests}, responses: {responses}");
-
-    assert!(requests > 0, "should have requests");
-    assert!(responses > 0, "should have responses");
-
-    let success_rate = msgs.len() as f64 / result.total as f64;
-    assert!(
-        success_rate > 0.999,
-        "parse success rate too low: {:.3}%",
-        success_rate * 100.0
-    );
-
-    let with_callid = msgs.iter().filter(|m| m.call_id().is_some()).count();
-    let ratio = with_callid as f64 / msgs.len() as f64;
-    eprintln!(
-        "  with Call-ID: {with_callid}/{} ({:.1}%)",
-        msgs.len(),
-        ratio * 100.0
-    );
-    assert!(
-        ratio > 0.99,
-        "expected >99% of messages to have Call-ID, got {:.1}%",
-        ratio * 100.0
-    );
 }
 
 #[test]
@@ -194,45 +155,21 @@ fn tcp_method_distribution() {
         return;
     }
 
-    let mut methods: HashMap<String, usize> = HashMap::new();
-    for msg in &result.parsed {
-        let method = match &msg.message_type {
-            SipMessageType::Request { method, .. } => method.clone(),
-            SipMessageType::Response { code, .. } => format!("{code}"),
-        };
-        *methods.entry(method).or_default() += 1;
-    }
-
-    let mut sorted: Vec<_> = methods.into_iter().collect();
-    sorted.sort_by_key(|b| std::cmp::Reverse(b.1));
+    let sorted = method_histogram(&result.parsed);
 
     eprintln!("esinet1-v4-tcp method distribution:");
     for (method, count) in &sorted {
         eprintln!("  {method}: {count}");
     }
-}
 
-#[test]
-fn udp_all_messages_parse() {
-    let result = parse_file("esinet1-v4-udp.dump.20");
-    if result.total == 0 {
-        return;
-    }
-    assert_parse_stats(&result.stats, "esinet1-v4-udp.dump.20", 1);
-    let msgs = &result.parsed;
-
-    eprintln!("esinet1-v4-udp.dump.20: {} parsed messages", msgs.len());
-    assert!(msgs.iter().all(|m| m.transport == Transport::Udp));
-    assert_eq!(result.errors, 0, "UDP should have zero parse errors");
-
-    let with_callid = msgs.iter().filter(|m| m.call_id().is_some()).count();
-    let ratio = with_callid as f64 / msgs.len() as f64;
-    eprintln!(
-        "  with Call-ID: {with_callid}/{} ({:.1}%)",
-        msgs.len(),
-        ratio * 100.0
+    assert!(
+        sorted.iter().any(|(m, _)| m == "INVITE"),
+        "expected INVITE in method distribution"
     );
-    assert!(ratio > 0.99);
+    assert!(
+        sorted.iter().any(|(m, _)| m == "200"),
+        "expected 200 responses in method distribution"
+    );
 }
 
 #[test]
@@ -243,22 +180,12 @@ fn tls_v6_all_messages_parse() {
     }
     assert_parse_stats(&result.stats, "esinet1-v6-tls.dump.180", 1);
     let msgs = &result.parsed;
+    assert!(!msgs.is_empty(), "no messages parsed");
 
     eprintln!("esinet1-v6-tls.dump.180: {} parsed messages", msgs.len());
     assert!(msgs.iter().all(|m| m.transport == Transport::Tls));
 
-    let mut methods: HashMap<String, usize> = HashMap::new();
-    for msg in msgs {
-        let method = match &msg.message_type {
-            SipMessageType::Request { method, .. } => method.clone(),
-            SipMessageType::Response { code, .. } => format!("{code}"),
-        };
-        *methods.entry(method).or_default() += 1;
-    }
-
-    let mut sorted: Vec<_> = methods.into_iter().collect();
-    sorted.sort_by_key(|b| std::cmp::Reverse(b.1));
-
+    let sorted = method_histogram(msgs);
     eprintln!("  method distribution:");
     for (method, count) in &sorted {
         eprintln!("    {method}: {count}");
@@ -280,71 +207,13 @@ fn tls_v4_all_messages_parse() {
     }
     assert_parse_stats(&result.stats, "esinet1-v4-tls.dump.180", 1);
     let msgs = &result.parsed;
+    assert!(!msgs.is_empty(), "no messages parsed");
 
     eprintln!("esinet1-v4-tls.dump.180: {} parsed messages", msgs.len());
     assert!(msgs.iter().all(|m| m.transport == Transport::Tls));
 
     let with_callid = msgs.iter().filter(|m| m.call_id().is_some()).count();
     eprintln!("  with Call-ID: {with_callid}/{}", msgs.len());
-}
-
-#[test]
-fn tcp_v6_all_messages_parse() {
-    let result = parse_file("esinet1-v6-tcp.dump.205");
-    if result.total == 0 {
-        return;
-    }
-    assert_parse_stats(&result.stats, "esinet1-v6-tcp.dump.205", 1);
-    let msgs = &result.parsed;
-
-    eprintln!(
-        "esinet1-v6-tcp.dump.205: {} parsed, {} errors out of {} total",
-        msgs.len(),
-        result.errors,
-        result.total
-    );
-
-    let requests = msgs
-        .iter()
-        .filter(|m| matches!(m.message_type, SipMessageType::Request { .. }))
-        .count();
-    let responses = msgs
-        .iter()
-        .filter(|m| matches!(m.message_type, SipMessageType::Response { .. }))
-        .count();
-    eprintln!("  requests: {requests}, responses: {responses}");
-
-    assert!(requests > 0, "should have requests");
-    assert!(responses > 0, "should have responses");
-
-    let success_rate = msgs.len() as f64 / result.total as f64;
-    assert!(
-        success_rate > 0.999,
-        "parse success rate too low: {:.3}%",
-        success_rate * 100.0
-    );
-}
-
-#[test]
-fn udp_v6_all_messages_parse() {
-    let result = parse_file("esinet1-v6-udp.dump.205");
-    if result.total == 0 {
-        return;
-    }
-    assert_parse_stats(&result.stats, "esinet1-v6-udp.dump.205", 1);
-    let msgs = &result.parsed;
-
-    eprintln!("esinet1-v6-udp.dump.205: {} parsed messages", msgs.len());
-    assert!(msgs.iter().all(|m| m.transport == Transport::Udp));
-
-    let with_callid = msgs.iter().filter(|m| m.call_id().is_some()).count();
-    let ratio = with_callid as f64 / msgs.len() as f64;
-    eprintln!(
-        "  with Call-ID: {with_callid}/{} ({:.1}%)",
-        msgs.len(),
-        ratio * 100.0
-    );
-    assert!(ratio > 0.99);
 }
 
 #[test]
@@ -368,7 +237,7 @@ fn messages_with_body_have_content_type() {
     if !with_body.is_empty() {
         let ratio = with_ct as f64 / with_body.len() as f64;
         assert!(
-            ratio > 0.99,
+            ratio > MIN_HEADER_PRESENCE,
             "messages with body should have Content-Type ({:.1}%)",
             ratio * 100.0
         );
@@ -382,6 +251,7 @@ fn cseq_present_on_all_messages() {
         return;
     }
     let msgs = &result.parsed;
+    assert!(!msgs.is_empty(), "no messages parsed");
 
     let with_cseq = msgs.iter().filter(|m| m.cseq().is_some()).count();
     let ratio = with_cseq as f64 / msgs.len() as f64;
@@ -390,7 +260,11 @@ fn cseq_present_on_all_messages() {
         msgs.len(),
         ratio * 100.0
     );
-    assert!(ratio > 0.99, "expected >99% with CSeq");
+    assert!(
+        ratio > MIN_HEADER_PRESENCE,
+        "expected >{:.0}% with CSeq",
+        MIN_HEADER_PRESENCE * 100.0
+    );
 }
 
 #[test]
@@ -405,6 +279,7 @@ fn response_method_extraction() {
         .iter()
         .filter(|m| matches!(m.message_type, SipMessageType::Response { .. }))
         .collect();
+    assert!(!responses.is_empty(), "expected response messages");
 
     let with_method = responses.iter().filter(|m| m.method().is_some()).count();
     let ratio = with_method as f64 / responses.len() as f64;
@@ -413,7 +288,10 @@ fn response_method_extraction() {
         responses.len(),
         ratio * 100.0
     );
-    assert!(ratio > 0.99, "responses should extract method from CSeq");
+    assert!(
+        ratio > MIN_HEADER_PRESENCE,
+        "responses should extract method from CSeq"
+    );
 }
 
 /// `SipMessage::method` reads the method without parsing. Over the whole corpus
@@ -429,12 +307,9 @@ fn cheap_method_agrees_with_parsed_method() {
         "internal-v4.dump.20",
         "internal-v6.dump.20",
     ] {
-        let path = sample_dir().join(name);
-        if !path.exists() {
-            eprintln!("skipping {name}: file not found");
+        let Some(file) = open_sample(name) else {
             continue;
-        }
-        let file = File::open(&path).unwrap();
+        };
         let mut classified = 0usize;
         let mut total = 0usize;
         for msg in MessageIterator::new(file).flatten() {
@@ -458,7 +333,7 @@ fn cheap_method_agrees_with_parsed_method() {
             classified as f64 / total as f64 * 100.0
         );
         assert!(
-            classified as f64 / total as f64 > 0.99,
+            classified as f64 / total as f64 > MIN_HEADER_PRESENCE,
             "{name}: expected >99% of messages classifiable without a parse"
         );
     }
@@ -480,7 +355,8 @@ fn tcp_multipart_bodies() {
         return;
     }
 
-    let mut ct_distribution: HashMap<String, usize> = HashMap::new();
+    let mut ct_distribution: std::collections::HashMap<String, usize> =
+        std::collections::HashMap::new();
     let mut total_parts = 0;
     let mut parse_failures = 0;
 
@@ -552,4 +428,15 @@ fn tls_v6_multipart_bodies() {
 
     eprintln!("  with SDP part: {has_sdp}");
     eprintln!("  with PIDF/EIDO/XML part: {has_pidf_or_eido}");
+
+    // Production data pairs multipart bodies as SDP + PIDF/EIDO location XML;
+    // a multipart message with neither means the split silently dropped a part.
+    assert!(
+        has_sdp > 0,
+        "expected at least one multipart message with an SDP part"
+    );
+    assert!(
+        has_pidf_or_eido > 0,
+        "expected at least one multipart message with a PIDF/EIDO/XML part"
+    );
 }
