@@ -229,9 +229,7 @@ enum Resync {
     Wait,
 }
 
-/// Extract complete SIP messages from a connection buffer into `ready`.
-/// Messages are complete when we find headers (\r\n\r\n) and have
-/// Content-Length bytes of body available.
+/// Move every message the buffer already holds in full into `ready`.
 fn extract_complete(
     buf: &mut ConnectionBuffer,
     key: &ConnectionKey,

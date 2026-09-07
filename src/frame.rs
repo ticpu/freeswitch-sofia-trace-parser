@@ -417,11 +417,8 @@ impl<R: Read> FrameIterator<R> {
         Ok(true)
     }
 
-    /// Check if skipped content is a truncated frame from a logrotate file boundary.
-    ///
-    /// Detection: the skipped content ends with `\r\n\r\n\x0B\n` — the SIP header/body
-    /// terminator followed by the frame boundary marker. This pattern indicates the tail
-    /// of a SIP frame that was split across logrotated dump files.
+    /// A SIP header terminator right before a frame boundary is the tail of a
+    /// frame logrotate copied into both files.
     fn is_replay(&self, skipped: &[u8]) -> bool {
         if self.frame_count == 0 {
             return false;
