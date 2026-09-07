@@ -281,10 +281,72 @@ fn parse_status_line(line: &[u8]) -> Result<StartLineRef<'_>, ParseError> {
     Ok(StartLineRef::Response { code, reason })
 }
 
+fn is_token_byte(c: u8) -> bool {
+    c.is_ascii_alphanumeric() || b"-._!%*+`'~".contains(&c)
+}
+
 fn is_sip_token(b: &[u8]) -> bool {
-    !b.is_empty()
-        && b.iter()
-            .all(|&c| c.is_ascii_alphanumeric() || b"-._!%*+`'~".contains(&c))
+    !b.is_empty() && b.iter().copied().all(is_token_byte)
+}
+
+/// Whether a buffer opens on a SIP start line, for a reader that may not hold
+/// the whole line yet.
+pub(crate) enum SipStart {
+    /// The first line is a request line or a status line.
+    Yes,
+    /// The first line cannot become either, however it continues.
+    No,
+    /// No CRLF yet, and what is buffered is still a possible prefix.
+    NeedMore,
+}
+
+/// The start-line grammar [`parse_first_line_ref`] accepts, answered on bytes
+/// that may still be arriving. Level 2 resynchronises on this, so anything it
+/// accepts is a message Level 3 parses.
+pub(crate) fn sip_start(buf: &[u8]) -> SipStart {
+    if buf.starts_with(b"SIP/2.0 ") {
+        return SipStart::Yes;
+    }
+    let mut method_end = 0;
+    while method_end < buf.len() && is_token_byte(buf[method_end]) {
+        method_end += 1;
+    }
+    if method_end == buf.len() {
+        return SipStart::NeedMore;
+    }
+    if method_end == 0 || buf[method_end] != b' ' {
+        return if b"SIP/2.0 ".starts_with(buf) {
+            SipStart::NeedMore
+        } else {
+            SipStart::No
+        };
+    }
+
+    // A start line holds no CR or LF of its own, so a lone one rules it out and
+    // a trailing CR is the terminator still arriving.
+    let rest = &buf[method_end + 1..];
+    let mut last_space = None;
+    let mut i = 0;
+    while i < rest.len() {
+        match rest[i] {
+            b'\r' => match rest.get(i + 1) {
+                Some(b'\n') => break,
+                Some(_) => return SipStart::No,
+                None => return SipStart::NeedMore,
+            },
+            b'\n' => return SipStart::No,
+            b' ' => last_space = Some(i),
+            _ => {}
+        }
+        i += 1;
+    }
+    if i == rest.len() {
+        return SipStart::NeedMore;
+    }
+    match last_space {
+        Some(space) if space > 0 && &rest[space + 1..i] == b"SIP/2.0" => SipStart::Yes,
+        _ => SipStart::No,
+    }
 }
 
 /// A syntactically valid header first line: a nonempty SIP token, optionally

@@ -5,6 +5,7 @@ use memchr::memmem;
 use tracing::{debug, trace, warn};
 
 use crate::frame::{FrameIterator, ParseError};
+use crate::sip::{sip_start, SipStart};
 use crate::types::{
     Direction, ParseStats, SipMessage, SkipTracking, Timestamp, Transport, UnparsedRegion,
 };
@@ -271,43 +272,55 @@ fn extract_complete(buf: &mut ConnectionBuffer, key: &(Direction, String)) -> Ve
         }
 
         // Skip non-SIP prefix (body fragments from incomplete prior messages)
-        if !is_sip_start(&buf.content) {
-            // Drain leading whitespace (CRLF padding, bare LF keep-alives, etc.)
-            let ws_len = buf
-                .content
-                .iter()
-                .position(|&b| !matches!(b, b'\r' | b'\n' | b' ' | b'\t'))
-                .unwrap_or(buf.content.len());
+        match sip_start(&buf.content) {
+            SipStart::Yes => {}
+            SipStart::NeedMore => break, // Start line incomplete, wait for more data
+            SipStart::No => {
+                // Drain leading whitespace (CRLF padding, bare LF keep-alives, etc.)
+                let ws_len = buf
+                    .content
+                    .iter()
+                    .position(|&b| !matches!(b, b'\r' | b'\n' | b' ' | b'\t'))
+                    .unwrap_or(buf.content.len());
 
-            if ws_len > 0 {
-                if ws_len == buf.content.len() {
-                    trace!(
-                        bytes = ws_len,
-                        address = %key.1,
-                        "drained transport whitespace"
-                    );
-                    buf.content.clear();
-                    buf.frame_count = 0;
-                    break;
+                if ws_len > 0 {
+                    if ws_len == buf.content.len() {
+                        trace!(
+                            bytes = ws_len,
+                            address = %key.1,
+                            "drained transport whitespace"
+                        );
+                        buf.content.clear();
+                        buf.frame_count = 0;
+                        break;
+                    }
+                    match sip_start(&buf.content[ws_len..]) {
+                        SipStart::Yes => {
+                            trace!(bytes = ws_len, "drained inter-message whitespace padding");
+                            buf.content.drain(..ws_len);
+                            continue;
+                        }
+                        SipStart::NeedMore => {
+                            trace!(bytes = ws_len, "drained inter-message whitespace padding");
+                            buf.content.drain(..ws_len);
+                            break;
+                        }
+                        SipStart::No => {}
+                    }
                 }
-                if is_sip_start(&buf.content[ws_len..]) {
-                    trace!(bytes = ws_len, "drained inter-message whitespace padding");
-                    buf.content.drain(..ws_len);
-                    continue;
-                }
-            }
 
-            match find_sip_start(&buf.content) {
-                Some(offset) if offset > 0 => {
-                    warn!(
-                        skipped_bytes = offset,
-                        address = %key.1,
-                        "skipped non-SIP prefix in TCP buffer"
-                    );
-                    buf.content.drain(..offset);
-                    continue;
+                match find_sip_start(&buf.content) {
+                    Some(offset) if offset > 0 => {
+                        warn!(
+                            skipped_bytes = offset,
+                            address = %key.1,
+                            "skipped non-SIP prefix in TCP buffer"
+                        );
+                        buf.content.drain(..offset);
+                        continue;
+                    }
+                    _ => break, // No SIP start found, wait for more data
                 }
-                _ => break, // No SIP start found, wait for more data
             }
         }
 
@@ -434,38 +447,11 @@ fn parse_content_length(value: &[u8]) -> Option<usize> {
     s.parse().ok()
 }
 
-/// Check if data at given position starts with a SIP request or response line.
-fn is_sip_start(data: &[u8]) -> bool {
-    if data.starts_with(b"SIP/2.0 ") {
-        return true;
-    }
-    const METHODS: &[&[u8]] = &[
-        b"INVITE ",
-        b"ACK ",
-        b"BYE ",
-        b"CANCEL ",
-        b"OPTIONS ",
-        b"REGISTER ",
-        b"PRACK ",
-        b"SUBSCRIBE ",
-        b"NOTIFY ",
-        b"PUBLISH ",
-        b"INFO ",
-        b"REFER ",
-        b"MESSAGE ",
-        b"UPDATE ",
-    ];
-    for method in METHODS {
-        if data.starts_with(method) {
-            return true;
-        }
-    }
-    false
-}
-
-/// Scan for the first SIP message start at a CRLF boundary within data.
+/// Scan for the first SIP message start at a CRLF boundary within data. A
+/// candidate whose start line is still arriving stops the scan there, so the
+/// bytes before it are dropped and the line itself is waited for.
 fn find_sip_start(data: &[u8]) -> Option<usize> {
-    if is_sip_start(data) {
+    if !matches!(sip_start(data), SipStart::No) {
         return Some(0);
     }
     let mut pos = 0;
@@ -474,7 +460,7 @@ fn find_sip_start(data: &[u8]) -> Option<usize> {
         if candidate >= data.len() {
             break;
         }
-        if is_sip_start(&data[candidate..]) {
+        if !matches!(sip_start(&data[candidate..]), SipStart::No) {
             return Some(candidate);
         }
         pos = candidate;
@@ -764,23 +750,48 @@ mod tests {
     }
 
     #[test]
-    fn is_sip_start_request() {
-        assert!(is_sip_start(b"INVITE sip:user@host SIP/2.0\r\n"));
-        assert!(is_sip_start(b"OPTIONS sip:user@host SIP/2.0\r\n"));
-        assert!(is_sip_start(b"NOTIFY sip:user@host SIP/2.0\r\n"));
-        assert!(is_sip_start(b"ACK sip:user@host SIP/2.0\r\n"));
+    fn sip_start_request() {
+        assert!(matches!(
+            sip_start(b"INVITE sip:user@host SIP/2.0\r\n"),
+            SipStart::Yes
+        ));
+        assert!(matches!(
+            sip_start(b"XYZZY sip:user@host SIP/2.0\r\n"),
+            SipStart::Yes
+        ));
+        assert!(matches!(
+            sip_start(b"ACK sip:user@host SIP/2.0\r\n"),
+            SipStart::Yes
+        ));
     }
 
     #[test]
-    fn is_sip_start_response() {
-        assert!(is_sip_start(b"SIP/2.0 200 OK\r\n"));
-        assert!(is_sip_start(b"SIP/2.0 100 Trying\r\n"));
+    fn sip_start_response() {
+        assert!(matches!(sip_start(b"SIP/2.0 200 OK\r\n"), SipStart::Yes));
+        assert!(matches!(
+            sip_start(b"SIP/2.0 100 Trying\r\n"),
+            SipStart::Yes
+        ));
     }
 
     #[test]
-    fn is_sip_start_not_sip() {
-        assert!(!is_sip_start(b"some random data"));
-        assert!(!is_sip_start(b"HTTP/1.1 200 OK\r\n"));
+    fn sip_start_not_sip() {
+        assert!(matches!(sip_start(b"some random data\r\n"), SipStart::No));
+        assert!(matches!(sip_start(b"HTTP/1.1 200 OK\r\n"), SipStart::No));
+        assert!(matches!(
+            sip_start(b"INVITE sip:user@host HTTP/1.1\r\n"),
+            SipStart::No
+        ));
+    }
+
+    #[test]
+    fn sip_start_needs_more() {
+        assert!(matches!(sip_start(b"INVI"), SipStart::NeedMore));
+        assert!(matches!(sip_start(b"SIP/2."), SipStart::NeedMore));
+        assert!(matches!(
+            sip_start(b"INVITE sip:user@host SIP/2.0\r"),
+            SipStart::NeedMore
+        ));
     }
 
     #[test]
@@ -797,7 +808,7 @@ mod tests {
 
     #[test]
     fn find_sip_start_none() {
-        let data = b"no SIP here at all";
+        let data = b"no SIP here\r\nat all\r\n";
         assert_eq!(find_sip_start(data), None);
     }
 
