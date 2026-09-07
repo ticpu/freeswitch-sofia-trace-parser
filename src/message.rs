@@ -732,6 +732,28 @@ mod tests {
     }
 
     #[test]
+    fn find_content_length_padded_before_colon() {
+        let data = b"NOTIFY sip:a SIP/2.0\r\nContent-Length \t: 5\r\n\r\nhello";
+        assert_eq!(find_content_length(data), Some(5));
+    }
+
+    #[test]
+    fn padded_colon_splits_aggregated_messages() {
+        let msg1 = b"NOTIFY sip:a SIP/2.0\r\nContent-Length : 5\r\n\r\nhello";
+        let msg2 = b"SIP/2.0 200 OK\r\nContent-Length: 0\r\n\r\n";
+        let mut combined = Vec::new();
+        combined.extend_from_slice(msg1);
+        combined.extend_from_slice(msg2);
+        let data = make_frame(Direction::Recv, Transport::Tcp, "[::1]:5060", &combined);
+        let msgs: Vec<SipMessage> = MessageIterator::new(&data[..])
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert_eq!(msgs.len(), 2);
+        assert_eq!(msgs[0].content, msg1);
+        assert_eq!(msgs[1].content, msg2);
+    }
+
+    #[test]
     fn find_content_length_missing() {
         let data = b"NOTIFY sip:a SIP/2.0\r\nCSeq: 1 NOTIFY\r\n\r\n";
         assert_eq!(find_content_length(data), None);
