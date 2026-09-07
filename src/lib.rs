@@ -41,6 +41,16 @@
 //! [`SkipReason`]. Access parse statistics via the `stats()` / `parse_stats()`
 //! methods on each iterator. See [`ParseStats`] and [`SkipTracking`] for details.
 
+#![cfg_attr(
+    not(test),
+    deny(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::unreachable
+    )
+)]
+
 mod finders;
 
 /// Level 1: frame boundary detection and header parsing.
