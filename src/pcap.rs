@@ -546,7 +546,7 @@ fn timestamp_to_unix(ts: Timestamp, date_base: Option<(u16, u8, u8)>) -> (u32, u
     (secs, us)
 }
 
-#[cfg(all(test, feature = "pcap"))]
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -566,9 +566,8 @@ mod tests {
         }
     }
 
-    fn writer_transport() -> (PcapWriter<Vec<u8>>, ()) {
-        let cfg = PcapConfig::default();
-        (PcapWriter::new(Vec::new(), cfg).unwrap(), ())
+    fn writer_transport() -> PcapWriter<Vec<u8>> {
+        PcapWriter::new(Vec::new(), PcapConfig::default()).unwrap()
     }
 
     fn writer_network() -> PcapWriter<Vec<u8>> {
@@ -603,7 +602,7 @@ mod tests {
 
     #[test]
     fn udp_ipv4_packet_layout() {
-        let (mut w, _) = writer_transport();
+        let mut w = writer_transport();
         let f = frame(
             Direction::Recv,
             Transport::Udp,
@@ -632,7 +631,7 @@ mod tests {
 
     #[test]
     fn udp_ipv6_packet_layout() {
-        let (mut w, _) = writer_transport();
+        let mut w = writer_transport();
         let f = frame(Direction::Sent, Transport::Udp, "[2001:db8::2]:5060", b"OK");
         w.write_frame(&f).unwrap();
         let bytes = w.into_inner();
@@ -646,7 +645,7 @@ mod tests {
 
     #[test]
     fn tcp_seq_advances_per_direction() {
-        let (mut w, _) = writer_transport();
+        let mut w = writer_transport();
         let s1 = frame(Direction::Sent, Transport::Tcp, "10.0.0.1:5060", b"AAAA"); // 4 bytes
         let s2 = frame(Direction::Sent, Transport::Tcp, "10.0.0.1:5060", b"BB"); // 2 bytes
         let r1 = frame(Direction::Recv, Transport::Tcp, "10.0.0.1:5060", b"ZZZ"); // 3 bytes
@@ -678,7 +677,7 @@ mod tests {
 
     #[test]
     fn tls_encoded_as_tcp() {
-        let (mut w, _) = writer_transport();
+        let mut w = writer_transport();
         let f = frame(Direction::Sent, Transport::Tls, "10.0.0.1:5061", b"INVITE");
         w.write_frame(&f).unwrap();
         let bytes = w.into_inner();
@@ -720,7 +719,7 @@ mod tests {
 
     #[test]
     fn time_only_no_base_is_epoch() {
-        let (mut w, _) = writer_transport();
+        let mut w = writer_transport();
         let f = frame(Direction::Recv, Transport::Udp, "10.0.0.1:5060", b"x");
         w.write_frame(&f).unwrap();
         let bytes = w.into_inner();
@@ -731,7 +730,7 @@ mod tests {
 
     #[test]
     fn direction_pkttype() {
-        let (mut w, _) = writer_transport();
+        let mut w = writer_transport();
         let r = frame(Direction::Recv, Transport::Udp, "10.0.0.1:5060", b"x");
         let s = frame(Direction::Sent, Transport::Udp, "10.0.0.1:5060", b"y");
         w.write_frame(&r).unwrap();
@@ -747,7 +746,7 @@ mod tests {
 
     #[test]
     fn tcp_checksum_validates() {
-        let (mut w, _) = writer_transport();
+        let mut w = writer_transport();
         let f = frame(
             Direction::Sent,
             Transport::Tcp,
@@ -797,7 +796,7 @@ mod tests {
 
     #[test]
     fn invalid_address_returns_error() {
-        let (mut w, _) = writer_transport();
+        let mut w = writer_transport();
         let f = frame(Direction::Recv, Transport::Udp, "not-an-address", b"x");
         let err = w.write_frame(&f).unwrap_err();
         assert!(matches!(err, PcapError::InvalidAddress(_)));
@@ -805,7 +804,7 @@ mod tests {
 
     #[test]
     fn oversize_payload_is_refused() {
-        let (mut w, _) = writer_transport();
+        let mut w = writer_transport();
         let payload = vec![b'x'; 70 * 1024];
         let f = frame(Direction::Recv, Transport::Udp, "10.0.0.1:5060", &payload);
         let err = w.write_frame(&f).unwrap_err();
@@ -820,7 +819,7 @@ mod tests {
 
     #[test]
     fn large_payload_within_snaplen_writes() {
-        let (mut w, _) = writer_transport();
+        let mut w = writer_transport();
         let payload = vec![b'x'; 60 * 1024];
         let f = frame(Direction::Recv, Transport::Udp, "10.0.0.1:5060", &payload);
         w.write_frame(&f).unwrap();
@@ -886,7 +885,7 @@ mod tests {
 
     #[test]
     fn write_parsed_payload_round_trips() {
-        let (mut w, _) = writer_transport();
+        let mut w = writer_transport();
         let msg = parsed(
             Direction::Recv,
             Transport::Udp,
@@ -942,7 +941,7 @@ mod tests {
 
     #[test]
     fn write_parsed_with_local_overrides_default() {
-        let (mut w, _) = writer_transport();
+        let mut w = writer_transport();
         let msg = parsed(
             Direction::Recv,
             Transport::Udp,
@@ -966,7 +965,7 @@ mod tests {
 
     #[test]
     fn write_parsed_with_local_rejects_family_mismatch() {
-        let (mut w, _) = writer_transport();
+        let mut w = writer_transport();
         let msg = parsed(
             Direction::Sent,
             Transport::Udp,

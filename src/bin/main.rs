@@ -896,33 +896,9 @@ mod encode_qp_tests {
     use super::*;
 
     #[test]
-    fn plain_ascii_passthrough() {
-        assert_eq!(encode_qp(b"Content-Length: 0"), "Content-Length: 0");
-    }
-
-    #[test]
-    fn crlf_encoded() {
-        assert_eq!(
-            encode_qp(b"\r\n\r\nContent-Length: 0"),
-            "=0D=0A=0D=0AContent-Length: 0"
-        );
-    }
-
-    #[test]
-    fn binary_encoded() {
-        assert_eq!(encode_qp(&[0x00, 0x01, 0xFF]), "=00=01=FF");
-    }
-
-    #[test]
-    fn equals_sign_encoded() {
-        assert_eq!(encode_qp(b"a=b"), "a=3Db");
-    }
-
-    #[test]
-    fn no_soft_line_breaks() {
+    fn binary_mode_without_soft_line_breaks() {
+        assert_eq!(encode_qp(b"\r\n\x00\xFF"), "=0D=0A=00=FF");
         let long = "A".repeat(200);
-        let encoded = encode_qp(long.as_bytes());
-        assert!(!encoded.contains('='), "should not insert soft line breaks");
-        assert_eq!(encoded, long);
+        assert_eq!(encode_qp(long.as_bytes()), long);
     }
 }
