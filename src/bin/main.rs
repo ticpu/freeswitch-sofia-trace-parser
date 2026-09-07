@@ -3,7 +3,7 @@ use std::fs::File;
 use std::io::{self, Read};
 use std::process;
 
-use clap::Parser;
+use clap::{Parser, ValueEnum};
 use regex::Regex;
 use tracing::{debug, warn};
 
@@ -45,7 +45,7 @@ struct Cli {
 
     /// Filter by direction (recv/sent)
     #[arg(short, long, value_name = "DIR")]
-    direction: Option<String>,
+    direction: Option<DirectionArg>,
 
     /// Match address by regex
     #[arg(short, long, value_name = "REGEX")]
@@ -100,8 +100,8 @@ struct Cli {
     pcap_export: bool,
 
     /// Pcap depth: 3 = Level-1 frames as IP+SIP (proto 253), 4 = Level-2 messages as IP+UDP/TCP+SIP
-    #[arg(long, value_name = "N", default_value_t = 4)]
-    pcap_layer: u8,
+    #[arg(long, value_name = "N", requires = "pcap_export")]
+    pcap_layer: Option<PcapLayerArg>,
 
     /// Report unparsed input regions to stderr
     #[arg(long)]
@@ -114,6 +114,29 @@ struct Cli {
     /// Increase verbosity (-v info, -vv debug, -vvv trace)
     #[arg(short, long, action = clap::ArgAction::Count)]
     verbose: u8,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, ValueEnum)]
+enum DirectionArg {
+    Recv,
+    Sent,
+}
+
+impl From<DirectionArg> for Direction {
+    fn from(arg: DirectionArg) -> Self {
+        match arg {
+            DirectionArg::Recv => Direction::Recv,
+            DirectionArg::Sent => Direction::Sent,
+        }
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, ValueEnum)]
+enum PcapLayerArg {
+    #[value(name = "3")]
+    Network,
+    #[value(name = "4")]
+    Transport,
 }
 
 struct CompiledFilters {
@@ -188,12 +211,7 @@ impl CompiledFilters {
         }
 
         for (name, re) in &self.headers {
-            let matched = msg
-                .headers
-                .iter()
-                .filter(|(k, _)| k.eq_ignore_ascii_case(name))
-                .any(|(_, v)| re.is_match(v));
-            if !matched {
+            if !msg.headers.values(name).any(|v| re.is_match(v)) {
                 return false;
             }
         }
@@ -235,14 +253,7 @@ fn compile_filters(cli: &Cli) -> CompiledFilters {
 
     let call_id = cli.call_id.as_ref().map(|p| compile_regex(p, "call-id"));
 
-    let direction = cli.direction.as_ref().map(|d| match d.as_str() {
-        "recv" => Direction::Recv,
-        "sent" => Direction::Sent,
-        other => {
-            eprintln!("invalid direction '{other}': expected recv or sent");
-            process::exit(2);
-        }
-    });
+    let direction = cli.direction.map(Direction::from);
 
     let address = cli.address.as_ref().map(|p| compile_regex(p, "address"));
 
@@ -781,11 +792,6 @@ fn main() {
         process::exit(2);
     }
 
-    if cli.pcap_export && !matches!(cli.pcap_layer, 3 | 4) {
-        eprintln!("--pcap-layer must be 3 or 4");
-        process::exit(2);
-    }
-
     let layer3_filter_set = !cli.method.is_empty()
         || !cli.exclude.is_empty()
         || cli.call_id.is_some()
@@ -795,14 +801,14 @@ fn main() {
         || cli.body_grep.is_some()
         || cli.grep.is_some()
         || cli.dialog;
-    if cli.pcap_export && cli.pcap_layer == 3 && layer3_filter_set {
+    if cli.pcap_export && cli.pcap_layer == Some(PcapLayerArg::Network) && layer3_filter_set {
         eprintln!("--pcap-layer 3 emits raw frames; SIP-level filters are not applicable");
         process::exit(2);
     }
 
     let capture = cli.unparsed;
 
-    let stats = if cli.pcap_export && cli.pcap_layer == 3 {
+    let stats = if cli.pcap_export && cli.pcap_layer == Some(PcapLayerArg::Network) {
         pcap::run_layer3(open_input(&cli.files, !cli.no_grep_filter), capture)
     } else if cli.pcap_export {
         let filters = compile_filters(&cli);

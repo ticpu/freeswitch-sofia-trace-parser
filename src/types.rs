@@ -100,6 +100,26 @@ impl ParseStats {
     }
 }
 
+/// The input named none of the keywords a [`Direction`] or [`Transport`]
+/// is written as in a frame header.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnknownKeyword(String);
+
+impl UnknownKeyword {
+    /// The rejected input.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Display for UnknownKeyword {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "unknown keyword: {}", self.0)
+    }
+}
+
+impl std::error::Error for UnknownKeyword {}
+
 /// Whether a frame was received or sent by FreeSWITCH.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Direction {
@@ -111,14 +131,33 @@ pub enum Direction {
 
 impl fmt::Display for Direction {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Direction::Recv => f.write_str("recv"),
-            Direction::Sent => f.write_str("sent"),
+        f.write_str(self.as_str())
+    }
+}
+
+impl std::str::FromStr for Direction {
+    type Err = UnknownKeyword;
+
+    /// Accepts `recv` and `sent`, case-insensitively.
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        for candidate in [Direction::Recv, Direction::Sent] {
+            if s.eq_ignore_ascii_case(candidate.as_str()) {
+                return Ok(candidate);
+            }
         }
+        Err(UnknownKeyword(s.to_string()))
     }
 }
 
 impl Direction {
+    /// The keyword a frame header spells this direction with.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Direction::Recv => "recv",
+            Direction::Sent => "sent",
+        }
+    }
+
     /// Returns `"from"` for `Recv`, `"to"` for `Sent`.
     pub fn preposition(&self) -> &'static str {
         match self {
@@ -141,14 +180,40 @@ pub enum Transport {
     Wss,
 }
 
+impl Transport {
+    /// The keyword a frame header spells this transport with.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Transport::Tcp => "tcp",
+            Transport::Udp => "udp",
+            Transport::Tls => "tls",
+            Transport::Wss => "wss",
+        }
+    }
+}
+
 impl fmt::Display for Transport {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Transport::Tcp => f.write_str("tcp"),
-            Transport::Udp => f.write_str("udp"),
-            Transport::Tls => f.write_str("tls"),
-            Transport::Wss => f.write_str("wss"),
+        f.write_str(self.as_str())
+    }
+}
+
+impl std::str::FromStr for Transport {
+    type Err = UnknownKeyword;
+
+    /// Accepts `tcp`, `udp`, `tls` and `wss`, case-insensitively.
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        for candidate in [
+            Transport::Tcp,
+            Transport::Udp,
+            Transport::Tls,
+            Transport::Wss,
+        ] {
+            if s.eq_ignore_ascii_case(candidate.as_str()) {
+                return Ok(candidate);
+            }
         }
+        Err(UnknownKeyword(s.to_string()))
     }
 }
 
@@ -507,6 +572,15 @@ impl SipMessageType {
 pub struct Headers(pub Vec<(String, String)>);
 
 impl Headers {
+    /// Every value recorded under `name`, case-insensitively, in wire order.
+    /// Compact forms are not resolved, as for [`value`](Self::value).
+    pub fn values<'a>(&'a self, name: &'a str) -> impl Iterator<Item = &'a str> + 'a {
+        self.0
+            .iter()
+            .filter(move |(k, _)| k.eq_ignore_ascii_case(name))
+            .map(|(_, v)| v.as_str())
+    }
+
     /// Case-insensitive header lookup, first match in wire order. Compact
     /// forms are not resolved: ask for the name the message is expected to
     /// carry.
