@@ -210,7 +210,9 @@ impl<R: std::io::Read> ParsedMessageIterator<R> {
         }
     }
 
-    /// Enable capturing of skipped bytes in the underlying frame parser.
+    /// Enable capturing of skipped bytes in the underlying frame parser;
+    /// `false` selects [`SkipTracking::CountOnly`]. Whichever of this and
+    /// [`skip_tracking`](Self::skip_tracking) is called last wins.
     pub fn capture_skipped(mut self, enable: bool) -> Self {
         self.inner = self.inner.capture_skipped(enable);
         self
@@ -225,11 +227,6 @@ impl<R: std::io::Read> ParsedMessageIterator<R> {
     /// Borrow the accumulated parse statistics.
     pub fn parse_stats(&self) -> &ParseStats {
         self.inner.parse_stats()
-    }
-
-    /// Mutably borrow the parse statistics.
-    pub fn parse_stats_mut(&mut self) -> &mut ParseStats {
-        self.inner.parse_stats_mut()
     }
 
     /// Take all accumulated unparsed regions, leaving the list empty.
@@ -251,7 +248,6 @@ impl<R: std::io::Read> Iterator for ParsedMessageIterator<R> {
 }
 
 fn content_preview(content: &[u8], max_len: usize) -> String {
-    use std::fmt::Write;
     let len = content.len().min(max_len);
     let s = String::from_utf8_lossy(&content[..len]);
     let mut out = String::with_capacity(s.len());
@@ -261,9 +257,7 @@ fn content_preview(content: &[u8], max_len: usize) -> String {
             '\n' => out.push_str("\\n"),
             '\t' => out.push_str("\\t"),
             '\0' => out.push_str("\\0"),
-            c if c.is_control() => {
-                let _ = write!(out, "\\x{:02x}", c as u32);
-            }
+            c if c.is_control() => out.push_str(&format!("\\x{:02x}", c as u32)),
             c => out.push(c),
         }
     }

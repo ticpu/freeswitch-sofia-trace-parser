@@ -368,11 +368,6 @@ impl<R: Read> FrameIterator<R> {
         &self.stats
     }
 
-    /// Mutably borrow the parse statistics.
-    pub fn stats_mut(&mut self) -> &mut ParseStats {
-        &mut self.stats
-    }
-
     /// Take all accumulated unparsed regions, leaving the list empty.
     pub fn drain_unparsed(&mut self) -> Vec<UnparsedRegion> {
         self.stats.drain_regions()

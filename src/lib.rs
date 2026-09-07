@@ -78,4 +78,8 @@ pub use message::MessageIterator;
 #[cfg(feature = "pcap")]
 pub use pcap::{PcapConfig, PcapError, PcapLayer, PcapWriter};
 pub use sip::{is_json_content_type, parse_sipfrag, ParsedMessageIterator};
-pub use types::*;
+pub use types::{
+    Direction, Frame, FrameMeta, Headers, MimePart, ParseStats, ParsedSipMessage, SipFragment,
+    SipMessage, SipMessageType, SkipReason, SkipTracking, StaleClock, Timestamp, Transport,
+    UnknownKeyword, UnparsedRegion,
+};

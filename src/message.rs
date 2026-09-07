@@ -85,11 +85,6 @@ impl<R: std::io::Read> MessageIterator<R> {
         self.frames.stats()
     }
 
-    /// Mutably borrow the parse statistics.
-    pub fn parse_stats_mut(&mut self) -> &mut ParseStats {
-        self.frames.stats_mut()
-    }
-
     /// Take all accumulated unparsed regions, leaving the list empty.
     pub fn drain_unparsed(&mut self) -> Vec<UnparsedRegion> {
         self.frames.drain_unparsed()
