@@ -1304,6 +1304,35 @@ mod tests {
     }
 
     #[test]
+    fn overlong_byte_count_does_not_buffer_ahead() {
+        let mut data = Vec::new();
+        data.extend_from_slice(
+            format!(
+                "recv {} bytes from tcp/1.1.1.1:5060 at 00:00:00.000000:\n",
+                MAX_PARTIAL_FRAME * 10
+            )
+            .as_bytes(),
+        );
+        data.extend_from_slice(b"hello\x0B\n");
+        while data.len() < MAX_PARTIAL_FRAME * 10 {
+            data.extend_from_slice(
+                b"sent 3 bytes to tcp/3.3.3.3:5060 at 02:00:00.000000:\nbar\x0B\n",
+            );
+        }
+
+        let mut iter = FrameIterator::new(&data[..]);
+        let first = iter.next().unwrap().unwrap();
+        assert_eq!(first.content, b"hello");
+        assert!(
+            iter.buf.len() <= MAX_PARTIAL_FRAME + READ_BUF_SIZE,
+            "buffered {} bytes on a byte_count ten times the frame",
+            iter.buf.len()
+        );
+        let second = iter.next().unwrap().unwrap();
+        assert_eq!(second.content, b"bar");
+    }
+
+    #[test]
     fn stats_partial_first_frame_within_limit() {
         // Content + \x0B\n boundary = MAX_PARTIAL_FRAME, should still be PartialFirstFrame
         let mut data = Vec::new();
