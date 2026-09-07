@@ -94,29 +94,31 @@ impl<R: std::io::Read> MessageIterator<R> {
 
     fn sweep_stale_buffers(&mut self) {
         let clock = &self.clock;
+        let mut incomplete = 0usize;
+        let mut pending_bytes = 0usize;
         self.buffers.retain(|key, buf| {
-            let elapsed = clock.now().saturating_sub(buf.last_seen);
-            if clock.is_stale(buf.last_seen) {
-                if buf.content.is_empty() {
-                    trace!(
-                        address = %key.1,
-                        direction = %key.0,
-                        elapsed_secs = elapsed,
-                        "evicted empty stale connection buffer"
-                    );
-                } else {
-                    warn!(
-                        address = %key.1,
-                        direction = %key.0,
-                        elapsed_secs = elapsed,
-                        pending_bytes = buf.content.len(),
-                        "evicted stale connection buffer with incomplete data"
-                    );
-                }
-                return false;
+            if !clock.is_stale(buf.last_seen) {
+                return true;
             }
-            true
+            if buf.content.is_empty() {
+                trace!(
+                    address = %key.1,
+                    direction = %key.0,
+                    elapsed_secs = clock.now().saturating_sub(buf.last_seen),
+                    "evicted empty stale connection buffer"
+                );
+            } else {
+                incomplete += 1;
+                pending_bytes += buf.content.len();
+            }
+            false
         });
+        if incomplete > 0 {
+            warn!(
+                buffers = incomplete,
+                pending_bytes, "evicted stale connection buffers with incomplete data"
+            );
+        }
     }
 
     fn flush_all(&mut self) {
