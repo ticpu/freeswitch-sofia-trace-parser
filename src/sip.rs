@@ -901,12 +901,26 @@ mod tests {
     #[test]
     fn method_none_when_cseq_follows_lf_blank_line() {
         let content = b"SIP/2.0 200 OK\r\nVia: x\n\r\nCSeq: 1 OPTIONS\r\n\r\n";
+        let parsed = make_sip_message(content).parse().unwrap();
         assert_eq!(
-            make_sip_message(content).parse().unwrap().method(),
+            parsed.method(),
             None,
             "precondition: the parsed side cannot see this CSeq"
         );
         assert_eq!(make_sip_message(content).method(), None);
+
+        assert_eq!(parsed.headers.len(), 1);
+        assert_eq!(parsed.header_value("Via"), Some("x"));
+        assert_eq!(parsed.body, b"CSeq: 1 OPTIONS\r\n\r\n");
+
+        let start_line = b"SIP/2.0 200 OK\r\n".len();
+        let (headers, body) = split_headers_body(content, start_line);
+        assert_eq!(headers, b"Via: x\n");
+        assert_eq!(
+            start_line + headers.len() + b"\r\n".len() + body.len(),
+            content.len(),
+            "every byte lands in the start line, the headers, the blank line or the body"
+        );
     }
 
     /// `ParsedSipMessage::method` splits the CSeq value on Unicode whitespace.
