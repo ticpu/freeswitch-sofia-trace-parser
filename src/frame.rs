@@ -20,6 +20,7 @@ const MAX_PARTIAL_FRAME: usize = 65537;
 /// Returned as `Iterator::Item = Result<T, ParseError>`. The caller decides
 /// whether to skip, log, or fail on each error.
 #[derive(Debug)]
+#[non_exhaustive]
 pub enum ParseError {
     /// Frame header is malformed (e.g., missing colon, bad timestamp).
     InvalidHeader(String),

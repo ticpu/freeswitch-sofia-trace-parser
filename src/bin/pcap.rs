@@ -33,10 +33,7 @@ fn finish(writer: &mut StdoutPcap) {
 }
 
 pub fn run_layer3(reader: Box<dyn Read>, capture_skipped: bool) -> ParseStats {
-    let mut writer = stdout_writer(PcapConfig {
-        layer: PcapLayer::Network,
-        ..PcapConfig::default()
-    });
+    let mut writer = stdout_writer(PcapConfig::default().with_layer(PcapLayer::Network));
     let mut iter = FrameIterator::new(reader).capture_skipped(capture_skipped);
     for result in &mut iter {
         match result {

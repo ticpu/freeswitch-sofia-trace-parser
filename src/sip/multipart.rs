@@ -126,7 +126,7 @@ impl ParsedSipMessage {
             headers.push((canonical.to_string(), value.clone()));
         }
         MimePart {
-            headers: Headers(headers),
+            headers: Headers::from(headers),
             body: self.body.clone(),
         }
     }

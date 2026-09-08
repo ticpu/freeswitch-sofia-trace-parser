@@ -17,6 +17,16 @@ This is a **library-first** crate. `src/bin/main.rs` is a sample (but complete) 
   `collections`).
 - **Never expose dependency types in public signatures.** A dependency major-version
   bump becomes a semver break if its types leak into the public API.
+- **Never expose a layout the crate chose.** A type the crate produces and the
+  caller only reads keeps its fields private behind accessors, so the
+  representation can change without a bump. A type the caller constructs or
+  matches keeps its fields public and carries `#[non_exhaustive]`, so a later
+  field, variant or config knob costs nothing; give config types `with_*`
+  builders, since `#[non_exhaustive]` also bans `..Default::default()` outside
+  the crate.
+- **Check API-shape changes with `--all-features`.** `pcap` is not a default
+  feature, so a plain `cargo check --all-targets` compiles neither it nor the
+  binary's pcap module, and the pre-commit hook shares that blind spot.
 
 ## Build & Test Workflow
 

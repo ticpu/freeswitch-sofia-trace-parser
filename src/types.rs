@@ -44,6 +44,7 @@ fn parse_socket_addr(address: &str) -> Option<SocketAddr> {
 /// Every byte in the input is either parsed or classified with one of these
 /// reasons, enabling byte-level coverage accounting via [`ParseStats`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum SkipReason {
     /// Truncated frame at the start of a file, typically from logrotate
     /// cutting mid-write. Capped at 65,537 bytes: the largest datagram plus
@@ -93,6 +94,7 @@ pub enum SkipTracking {
 
 /// A contiguous region of the input that was not parsed into a frame.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct UnparsedRegion {
     /// Byte offset from the start of the input stream.
     pub offset: u64,
@@ -622,7 +624,7 @@ impl SipMessageType {
 /// Headers in wire order as `(name, value)` pairs. Names preserve original
 /// casing; [`value`](Self::value) is the case-insensitive lookup.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct Headers(pub Vec<(String, String)>);
+pub struct Headers(Vec<(String, String)>);
 
 impl Headers {
     /// Every value recorded under `name`, case-insensitively, in wire order.

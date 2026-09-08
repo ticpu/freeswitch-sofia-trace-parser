@@ -318,7 +318,7 @@ fn parse_sip_content(msg: &SipMessage, content: &[u8]) -> Result<ParsedSipMessag
 }
 
 pub(crate) fn parse_headers(data: &[u8]) -> Headers {
-    Headers(extract_all_headers(&bytes_to_str(data)))
+    Headers::from(extract_all_headers(&bytes_to_str(data)))
 }
 
 /// Split at the first blank line, under the rule `sip_header` reads headers by:

@@ -82,6 +82,7 @@ pub enum PcapLayer {
 
 /// Caller-supplied policy for pcap synthesis.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct PcapConfig {
     /// Local endpoint to use when the remote is IPv4.
     pub local_v4: SocketAddr,
@@ -91,6 +92,32 @@ pub struct PcapConfig {
     pub date_base: Option<(u16, u8, u8)>,
     /// Where to stop synthesis.
     pub layer: PcapLayer,
+}
+
+impl PcapConfig {
+    /// Local endpoint for IPv4 remotes.
+    pub fn with_local_v4(mut self, addr: SocketAddr) -> Self {
+        self.local_v4 = addr;
+        self
+    }
+
+    /// Local endpoint for IPv6 remotes.
+    pub fn with_local_v6(mut self, addr: SocketAddr) -> Self {
+        self.local_v6 = addr;
+        self
+    }
+
+    /// Anchor date for `Timestamp::TimeOnly` values.
+    pub fn with_date_base(mut self, date: (u16, u8, u8)) -> Self {
+        self.date_base = Some(date);
+        self
+    }
+
+    /// Where to stop synthesis.
+    pub fn with_layer(mut self, layer: PcapLayer) -> Self {
+        self.layer = layer;
+        self
+    }
 }
 
 impl Default for PcapConfig {
@@ -107,6 +134,7 @@ impl Default for PcapConfig {
 
 /// Errors specific to pcap synthesis.
 #[derive(Debug)]
+#[non_exhaustive]
 pub enum PcapError {
     Io(io::Error),
     InvalidAddress(String),

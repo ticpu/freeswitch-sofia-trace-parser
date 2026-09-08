@@ -211,7 +211,7 @@ fn multipart_empty_body() {
 #[test]
 fn nested_part_typed_with_compact_content_type() {
     let part = MimePart {
-        headers: Headers(vec![(
+        headers: Headers::from(vec![(
             "c".to_string(),
             "multipart/mixed;boundary=inner".to_string(),
         )]),
