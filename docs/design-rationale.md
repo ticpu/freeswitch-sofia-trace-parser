@@ -194,6 +194,13 @@ The six reasons evolved from production observations:
   parsing. Usually a dump restart marker or inter-frame padding that
   wasn't fully stripped.
 
+A single reader cannot separate a rotation cut from a real truncation, which
+turns on the datagram size the caller expects, on whether it stitches adjacent
+files back together, and on whether the file is the newest of a set. Severity
+is the caller's to assign; the count and the total shortfall are maintained in
+every tracking mode, so that judgement stays available where the region
+records are not.
+
 ## TLS Keep-Alive and TransportNoise
 
 RFC 5626 Section 3.5.1 specifies CRLF as a SIP application-layer

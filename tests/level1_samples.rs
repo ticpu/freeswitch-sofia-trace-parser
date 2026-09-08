@@ -230,7 +230,10 @@ fn all_samples_consistent_frame_counts() {
             let mut iter = FrameIterator::new(file).skip_tracking(SkipTracking::TrackRegions);
             let count = iter.by_ref().filter_map(Result::ok).count();
             let stats = iter.stats();
-            eprintln!("  {name}: {count} frames, skipped={}", stats.bytes_skipped);
+            eprintln!(
+                "  {name}: {count} frames, skipped={}",
+                stats.bytes_skipped()
+            );
             assert_parse_stats(stats, &name, 1);
         }
     }
@@ -360,7 +363,7 @@ fn file_concatenation_two_dumps() {
     // swallowed as ordinary skipped bytes.
     let replayed = combined_iter
         .stats()
-        .unparsed_regions
+        .unparsed_regions()
         .iter()
         .filter(|r| r.reason == SkipReason::ReplayedFrame)
         .count();

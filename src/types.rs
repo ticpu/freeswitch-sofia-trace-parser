@@ -111,16 +111,42 @@ pub struct UnparsedRegion {
 /// (`bytes_read - bytes_skipped`) or skipped (`bytes_skipped`).
 #[derive(Debug, Default, Clone)]
 pub struct ParseStats {
-    /// Total bytes consumed from the reader.
-    pub bytes_read: u64,
-    /// Bytes that were skipped (not parsed into frames).
-    pub bytes_skipped: u64,
-    /// Detailed unparsed region records. Only populated when
-    /// [`SkipTracking`] is `TrackRegions` or `CaptureData`.
-    pub unparsed_regions: Vec<UnparsedRegion>,
+    pub(crate) bytes_read: u64,
+    pub(crate) bytes_skipped: u64,
+    pub(crate) incomplete_frames: u64,
+    pub(crate) incomplete_frame_bytes: u64,
+    pub(crate) unparsed_regions: Vec<UnparsedRegion>,
 }
 
 impl ParseStats {
+    /// Total bytes consumed from the reader.
+    pub fn bytes_read(&self) -> u64 {
+        self.bytes_read
+    }
+
+    /// Bytes that were skipped (not parsed into frames).
+    pub fn bytes_skipped(&self) -> u64 {
+        self.bytes_skipped
+    }
+
+    /// Frames whose content ran out before `byte_count` at end of input.
+    /// Maintained in every [`SkipTracking`] mode.
+    pub fn incomplete_frames(&self) -> u64 {
+        self.incomplete_frames
+    }
+
+    /// Total shortfall of those frames. A caller stitching rotated files
+    /// together decides for itself whether a shortfall is a rotation cut.
+    pub fn incomplete_frame_bytes(&self) -> u64 {
+        self.incomplete_frame_bytes
+    }
+
+    /// Detailed unparsed region records. Only populated when
+    /// [`SkipTracking`] is `TrackRegions` or `CaptureData`.
+    pub fn unparsed_regions(&self) -> &[UnparsedRegion] {
+        &self.unparsed_regions
+    }
+
     /// Take all accumulated unparsed regions, leaving the list empty.
     pub fn drain_regions(&mut self) -> Vec<UnparsedRegion> {
         std::mem::take(&mut self.unparsed_regions)

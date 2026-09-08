@@ -78,21 +78,21 @@ pub fn list_dumps(prefix: Option<&str>) -> Vec<PathBuf> {
 /// `InvalidHeader` skips.
 pub fn assert_parse_stats(stats: &ParseStats, name: &str, max_partial: usize) {
     let partial_count = stats
-        .unparsed_regions
+        .unparsed_regions()
         .iter()
         .filter(|r| r.reason == SkipReason::PartialFirstFrame)
         .count();
     let invalid_count = stats
-        .unparsed_regions
+        .unparsed_regions()
         .iter()
         .filter(|r| r.reason == SkipReason::InvalidHeader)
         .count();
 
     eprintln!(
         "{name}: bytes_read={}, bytes_skipped={}, regions={} (partial={partial_count}, invalid={invalid_count})",
-        stats.bytes_read,
-        stats.bytes_skipped,
-        stats.unparsed_regions.len(),
+        stats.bytes_read(),
+        stats.bytes_skipped(),
+        stats.unparsed_regions().len(),
     );
 
     assert!(

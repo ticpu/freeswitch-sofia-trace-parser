@@ -540,7 +540,7 @@ impl std::fmt::Display for MessageStats {
             writeln!(f, "  max frames per message: {}", self.max_frame_count)?;
         }
 
-        let (read, skipped) = (self.input.bytes_read, self.input.bytes_skipped);
+        let (read, skipped) = (self.input.bytes_read(), self.input.bytes_skipped());
         if read > 0 {
             let parsed_pct = ((read - skipped) as f64 / read as f64) * 100.0;
             writeln!(f, "\ninput:")?;
@@ -554,6 +554,14 @@ impl std::fmt::Display for MessageStats {
             )?;
             if skipped > 0 {
                 writeln!(f, "  skipped: {skipped} bytes")?;
+            }
+            if self.input.incomplete_frames() > 0 {
+                writeln!(
+                    f,
+                    "  incomplete at end of input: {} frames, {} bytes short",
+                    self.input.incomplete_frames(),
+                    self.input.incomplete_frame_bytes()
+                )?;
             }
         }
 
@@ -801,7 +809,7 @@ fn encode_qp(data: &[u8]) -> String {
 }
 
 fn print_unparsed(stats: &ParseStats) {
-    for region in &stats.unparsed_regions {
+    for region in stats.unparsed_regions() {
         eprintln!(
             "{}-{} ({} bytes): {}",
             region.offset,

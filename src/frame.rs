@@ -2,7 +2,7 @@ use std::fmt;
 use std::io::Read;
 
 use memchr::memmem;
-use tracing::{debug, info, trace, warn};
+use tracing::{debug, trace};
 
 use crate::finders::BOUNDARY;
 use crate::types::{
@@ -460,7 +460,7 @@ impl<R: Read> FrameIterator<R> {
             let abs_pos = search_from + pos;
             let after = abs_pos + 2;
             if after < self.buf.len() && is_frame_header(&self.buf[after..]) {
-                info!(skipped_bytes = after, "skipped partial first frame");
+                debug!(skipped_bytes = after, "skipped partial first frame");
                 return Some(after);
             }
             search_from = abs_pos + 2;
@@ -679,13 +679,15 @@ impl<R: Read> FrameIterator<R> {
 
                 if content.len() < byte_count {
                     let missing = byte_count - content.len();
-                    warn!(
+                    debug!(
                         frame = self.frame_count,
                         expected = byte_count,
                         actual = content.len(),
                         missing,
                         "incomplete frame at EOF"
                     );
+                    self.stats.incomplete_frames += 1;
+                    self.stats.incomplete_frame_bytes += missing as u64;
                     if self.skip_tracking != SkipTracking::CountOnly {
                         self.stats.unparsed_regions.push(UnparsedRegion {
                             offset: self.offset,
@@ -1245,6 +1247,23 @@ mod tests {
             stats.unparsed_regions[0].reason,
             crate::types::SkipReason::IncompleteFrame
         );
+    }
+
+    #[test]
+    fn stats_incomplete_frame_counted_under_count_only() {
+        let mut data = Vec::new();
+        data.extend_from_slice(
+            b"recv 5 bytes from tcp/1.1.1.1:5060 at 00:00:00.000000:\nhello\x0B\n",
+        );
+        data.extend_from_slice(b"recv 100 bytes from tcp/2.2.2.2:5060 at 01:00:00.000000:\n");
+        data.extend_from_slice(b"partial content only");
+
+        let mut iter = FrameIterator::new(&data[..]).skip_tracking(SkipTracking::CountOnly);
+        let _: Vec<Result<Frame, ParseError>> = iter.by_ref().collect();
+        let stats = iter.stats();
+        assert!(stats.unparsed_regions.is_empty());
+        assert_eq!(stats.incomplete_frames, 1);
+        assert_eq!(stats.incomplete_frame_bytes, 80);
     }
 
     #[test]
