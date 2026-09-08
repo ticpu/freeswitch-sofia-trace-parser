@@ -10,6 +10,9 @@ use crate::types::{
     UnparsedRegion,
 };
 
+/// Connections named in one eviction warning; the rest are counted.
+const EVICTION_SAMPLE: usize = 4;
+
 /// Level 2 streaming parser: reassembles TCP segments into complete SIP messages.
 ///
 /// Wraps a [`FrameIterator`] and groups TCP frames by `(Direction, Address)`.
@@ -94,6 +97,7 @@ impl<R: std::io::Read> MessageIterator<R> {
         let clock = &self.clock;
         let mut incomplete = 0usize;
         let mut pending_bytes = 0usize;
+        let mut dropped: Vec<String> = Vec::new();
         self.buffers.retain(|key, buf| {
             if !clock.is_stale(buf.last_seen) {
                 return true;
@@ -108,20 +112,33 @@ impl<R: std::io::Read> MessageIterator<R> {
             } else {
                 incomplete += 1;
                 pending_bytes += buf.content.len();
+                if dropped.len() < EVICTION_SAMPLE {
+                    dropped.push(format!(
+                        "{}/{} {}",
+                        buf.transport, key.direction, key.address
+                    ));
+                }
             }
             false
         });
         if incomplete > 0 {
+            let stats = self.frames.stats_mut();
+            stats.stale_evictions += incomplete as u64;
+            stats.stale_evicted_bytes += pending_bytes as u64;
             warn!(
                 buffers = incomplete,
-                pending_bytes, "evicted stale connection buffers with incomplete data"
+                pending_bytes,
+                connections = %dropped.join(", "),
+                undisplayed = incomplete - dropped.len(),
+                "evicted stale connection buffers with incomplete data"
             );
         }
     }
 
     fn flush_all(&mut self) {
+        let mut loss = ResyncLoss::default();
         for (key, mut buf) in std::mem::take(&mut self.buffers) {
-            extract_complete(&mut buf, &key, &mut self.ready);
+            extract_complete(&mut buf, &key, &mut self.ready, &mut loss);
 
             if !buf.content.is_empty() {
                 let content = std::mem::take(&mut buf.content);
@@ -130,6 +147,16 @@ impl<R: std::io::Read> MessageIterator<R> {
                     .push_back(message(&buf, &key, content, frame_count));
             }
         }
+        self.record_resync_loss(loss);
+    }
+
+    fn record_resync_loss(&mut self, loss: ResyncLoss) {
+        if loss.count == 0 {
+            return;
+        }
+        let stats = self.frames.stats_mut();
+        stats.non_sip_prefixes += loss.count;
+        stats.non_sip_prefix_bytes += loss.bytes;
     }
 }
 
@@ -196,11 +223,13 @@ impl<R: std::io::Read> Iterator for MessageIterator<R> {
                     buf.content.extend_from_slice(&frame.content);
                     buf.frame_count += 1;
 
-                    extract_complete(buf, &key, &mut self.ready);
+                    let mut loss = ResyncLoss::default();
+                    extract_complete(buf, &key, &mut self.ready, &mut loss);
 
                     if buf.content.is_empty() {
                         self.buffers.remove(&key);
                     }
+                    self.record_resync_loss(loss);
 
                     if let Some(msg) = self.ready.pop_front() {
                         return Some(Ok(msg));
@@ -224,17 +253,26 @@ enum Resync {
     Wait,
 }
 
+/// Bytes dropped resyncing a buffer, tallied into [`ParseStats`] once the
+/// caller is done borrowing the buffer map.
+#[derive(Default)]
+struct ResyncLoss {
+    count: u64,
+    bytes: u64,
+}
+
 /// Move every message the buffer already holds in full into `ready`.
 fn extract_complete(
     buf: &mut ConnectionBuffer,
     key: &ConnectionKey,
     ready: &mut VecDeque<SipMessage>,
+    loss: &mut ResyncLoss,
 ) {
     loop {
         if buf.content.is_empty() {
             return;
         }
-        match resync_to_sip_start(buf, key) {
+        match resync_to_sip_start(buf, key, loss) {
             Resync::Ready => {}
             Resync::Retry => continue,
             Resync::Wait => return,
@@ -246,7 +284,11 @@ fn extract_complete(
 }
 
 /// Drop whatever precedes the next SIP message start in the buffer.
-fn resync_to_sip_start(buf: &mut ConnectionBuffer, key: &ConnectionKey) -> Resync {
+fn resync_to_sip_start(
+    buf: &mut ConnectionBuffer,
+    key: &ConnectionKey,
+    loss: &mut ResyncLoss,
+) -> Resync {
     match sip_start(&buf.content) {
         SipStart::Yes => return Resync::Ready,
         SipStart::NeedMore => return Resync::Wait, // Start line incomplete, wait for more data
@@ -293,6 +335,8 @@ fn resync_to_sip_start(buf: &mut ConnectionBuffer, key: &ConnectionKey) -> Resyn
                 address = %key.address,
                 "skipped non-SIP prefix in TCP buffer"
             );
+            loss.count += 1;
+            loss.bytes += offset as u64;
             buf.content.drain(..offset);
             Resync::Retry
         }
@@ -475,7 +519,7 @@ mod tests {
             address: "[::1]:5060".to_string(),
         };
         let mut ready = VecDeque::new();
-        extract_complete(buf, &key, &mut ready);
+        extract_complete(buf, &key, &mut ready, &mut ResyncLoss::default());
         ready.into()
     }
 
@@ -859,6 +903,23 @@ mod tests {
     }
 
     #[test]
+    fn non_sip_prefix_counted_in_stats() {
+        let prefix = b"</conference-info>\r\n";
+        let msg = b"NOTIFY sip:a SIP/2.0\r\nContent-Length: 0\r\n\r\n";
+        let mut content = Vec::new();
+        content.extend_from_slice(prefix);
+        content.extend_from_slice(msg);
+        let data = make_frame(Direction::Recv, Transport::Tcp, "[::1]:5060", &content);
+
+        let mut iter = MessageIterator::new(&data[..]);
+        let msgs: Vec<SipMessage> = iter.by_ref().collect::<Result<Vec<_>, _>>().unwrap();
+        assert_eq!(msgs.len(), 1);
+        let stats = iter.parse_stats();
+        assert_eq!(stats.non_sip_prefixes(), 1);
+        assert_eq!(stats.non_sip_prefix_bytes(), prefix.len() as u64);
+    }
+
+    #[test]
     fn extract_resyncs_on_extension_method() {
         let prefix = b"</conference-info>\r\n";
         let msg = b"XYZZY sip:a SIP/2.0\r\nContent-Length: 0\r\n\r\n";
@@ -1197,6 +1258,9 @@ mod tests {
             iter.buffers.is_empty(),
             "stale buffer for [::99]:44444 should have been evicted"
         );
+        let stats = iter.parse_stats();
+        assert_eq!(stats.stale_evictions(), 1);
+        assert_eq!(stats.stale_evicted_bytes(), partial.len() as u64);
     }
 
     #[test]

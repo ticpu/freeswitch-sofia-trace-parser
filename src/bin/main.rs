@@ -563,6 +563,22 @@ impl std::fmt::Display for MessageStats {
                     self.input.incomplete_frame_bytes()
                 )?;
             }
+            if self.input.stale_evictions() > 0 {
+                writeln!(
+                    f,
+                    "  dropped with stale connections: {} buffers, {} bytes",
+                    self.input.stale_evictions(),
+                    self.input.stale_evicted_bytes()
+                )?;
+            }
+            if self.input.non_sip_prefixes() > 0 {
+                writeln!(
+                    f,
+                    "  resynced past non-SIP data: {} times, {} bytes",
+                    self.input.non_sip_prefixes(),
+                    self.input.non_sip_prefix_bytes()
+                )?;
+            }
         }
 
         let mut methods: Vec<_> = self.method_counts.iter().collect();

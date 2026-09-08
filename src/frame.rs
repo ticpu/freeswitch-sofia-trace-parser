@@ -369,6 +369,11 @@ impl<R: Read> FrameIterator<R> {
         &self.stats
     }
 
+    /// Level 2 records its own losses in the same accounting.
+    pub(crate) fn stats_mut(&mut self) -> &mut ParseStats {
+        &mut self.stats
+    }
+
     /// Take all accumulated unparsed regions, leaving the list empty.
     pub fn drain_unparsed(&mut self) -> Vec<UnparsedRegion> {
         self.stats.drain_regions()

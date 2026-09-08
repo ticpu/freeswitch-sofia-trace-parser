@@ -130,7 +130,9 @@ TLS connections use ephemeral source ports. Over a multi-day dump stream,
 the buffer map grows without bound as new ports appear and old ones go
 silent. The parser evicts buffers inactive for longer than the standard TCP
 keepalive interval: any connection silent for that long in a VoIP environment
-is dead. Non-empty buffers flush as incomplete messages.
+is dead. A non-empty buffer still held at end of input is flushed as an
+incomplete message; one evicted mid-stream is discarded instead, and that loss
+is counted in the parse statistics.
 
 Elapsed time comes from the timestamp's own date when the header carries one;
 time-only timestamps get a synthetic day counter that increments when the

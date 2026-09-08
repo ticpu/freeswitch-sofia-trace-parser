@@ -117,6 +117,10 @@ pub struct ParseStats {
     pub(crate) bytes_skipped: u64,
     pub(crate) incomplete_frames: u64,
     pub(crate) incomplete_frame_bytes: u64,
+    pub(crate) stale_evictions: u64,
+    pub(crate) stale_evicted_bytes: u64,
+    pub(crate) non_sip_prefixes: u64,
+    pub(crate) non_sip_prefix_bytes: u64,
     pub(crate) unparsed_regions: Vec<UnparsedRegion>,
 }
 
@@ -141,6 +145,28 @@ impl ParseStats {
     /// together decides for itself whether a shortfall is a rotation cut.
     pub fn incomplete_frame_bytes(&self) -> u64 {
         self.incomplete_frame_bytes
+    }
+
+    /// Connection buffers dropped mid-stream while still holding a partial
+    /// message. Unlike a frame cut at end of input, this content is never
+    /// emitted, so it is lost from the output.
+    pub fn stale_evictions(&self) -> u64 {
+        self.stale_evictions
+    }
+
+    /// Bytes those buffers were holding.
+    pub fn stale_evicted_bytes(&self) -> u64 {
+        self.stale_evicted_bytes
+    }
+
+    /// Times a TCP buffer resynchronised past bytes that began no SIP message.
+    pub fn non_sip_prefixes(&self) -> u64 {
+        self.non_sip_prefixes
+    }
+
+    /// Bytes discarded by those resynchronisations.
+    pub fn non_sip_prefix_bytes(&self) -> u64 {
+        self.non_sip_prefix_bytes
     }
 
     /// Detailed unparsed region records. Only populated when
