@@ -5,14 +5,24 @@ Optional override: $ARGUMENTS (format: vX.Y.Z). If provided, use that version.
 ## Version determination
 
 1. Find the last release tag (`git tag --sort=-v:refname | head -1`).
-2. Examine commits since that tag to classify the release type:
-   - **Patch**: only bug fixes, dependency bumps, build changes, docs.
-   - **Minor**: new features (`feat:`), new public API surface.
-   - **Major**: breaking API changes, removed public items.
-3. Bump the version accordingly. If **major**, stop and confirm before proceeding.
+2. Examine commits since that tag and classify the whole set.
 
-Pre-`1.0`, a breaking change is a minor bump (`0.7.x` → `0.8.0`) — `cargo semver-checks`
-enforces that, so a red semver run on a patch bump means the bump was wrong.
+This crate is pre-`1.0`, where cargo reads the **minor** slot as the major one:
+every `0.10.x` is compatible with every other, and `0.10` → `0.11` breaks each
+consumer pinned to `"0.10"`. The slots therefore shift down by one, and the
+mapping below is the one to apply — not the post-`1.0` habit:
+
+- **Patch** (`0.10.0` → `0.10.1`) — everything additive: bug fixes, new features
+  (`feat:`), new public API surface, dependency bumps, build changes, docs.
+- **Minor** (`0.10.x` → `0.11.0`) — breaking changes only: changed or removed
+  public items. Stop and confirm before proceeding.
+- **Major** (`0.x` → `1.0.0`) — never chosen automatically; ask.
+
+A `feat:` commit alone is a patch release here. Taking the minor slot for it
+tells every consumer their pin broke when nothing did. `cargo semver-checks`
+does not catch that direction — it flags a breaking change shipped as a patch,
+never an additive change shipped as a break — so a green run says nothing about
+whether the bump was too large.
 
 ## Pre-release checks
 
