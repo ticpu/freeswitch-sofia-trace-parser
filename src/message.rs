@@ -330,7 +330,7 @@ fn resync_to_sip_start(
 
     match find_sip_start(&buf.content) {
         Some(offset) if offset > 0 => {
-            warn!(
+            debug!(
                 skipped_bytes = offset,
                 address = %key.address,
                 "skipped non-SIP prefix in TCP buffer"
